@@ -10,7 +10,7 @@ const db = require("../database/db");
 const SUPPORT_SERVER_ID = "1545866787059671100";
 
 /*
- * Channels Resolve automatically watches.
+ * Official channels Resolve watches for knowledge.
  */
 const AUTO_KNOWLEDGE_CHANNELS = [
     "📜・rules",
@@ -27,7 +27,7 @@ const AUTO_KNOWLEDGE_CHANNELS = [
 ];
 
 /*
- * Complete Resolve server structure.
+ * Complete server structure.
  */
 const SERVER_STRUCTURE = {
     "📌 START HERE": [
@@ -155,7 +155,7 @@ function canManageServer(interaction) {
 }
 
 /*
- * Find category.
+ * Find a category.
  */
 function findCategory(guild, name) {
     return guild.channels.cache.find(
@@ -166,7 +166,7 @@ function findCategory(guild, name) {
 }
 
 /*
- * Find text channel.
+ * Find a text channel.
  */
 function findChannel(guild, name) {
     return guild.channels.cache.find(
@@ -177,7 +177,7 @@ function findChannel(guild, name) {
 }
 
 /*
- * Get or create a text channel.
+ * Create or reuse a channel.
  */
 async function getOrCreateChannel(
     guild,
@@ -259,7 +259,7 @@ async function createRoles(guild) {
 }
 
 /*
- * Setup database.
+ * Initialize database.
  */
 async function setupDatabase(guild) {
     await db.query(
@@ -304,18 +304,89 @@ async function setupDatabase(guild) {
 }
 
 /*
- * Save something directly to Resolve's knowledge.
+ * Save official setup knowledge WITHOUT duplicates.
  *
- * This is important because these messages are sent by the bot,
- * and the normal message watcher intentionally ignores bot messages.
+ * The combination of guild + source channel + title
+ * identifies the official setup entry.
  */
-async function saveKnowledge(
+async function saveOfficialKnowledge(
     guild,
     channel,
     title,
     content
 ) {
     try {
+        const existing =
+            await db.query(
+                `
+                SELECT id
+                FROM knowledge
+                WHERE guild_id = $1
+                AND source_channel_id = $2
+                AND title = $3
+                ORDER BY id ASC
+                `,
+                [
+                    guild.id,
+                    channel.id,
+                    title
+                ]
+            );
+
+        if (
+            existing.rows.length > 0
+        ) {
+            const keepId =
+                existing.rows[0].id;
+
+            /*
+             * Remove any accidental duplicates.
+             */
+            if (
+                existing.rows.length > 1
+            ) {
+                const duplicateIds =
+                    existing.rows
+                        .slice(1)
+                        .map(row => row.id);
+
+                await db.query(
+                    `
+                    DELETE FROM knowledge
+                    WHERE id = ANY($1::bigint[])
+                    `,
+                    [duplicateIds]
+                );
+            }
+
+            /*
+             * Update the existing entry.
+             */
+            await db.query(
+                `
+                UPDATE knowledge
+                SET
+                    content = $1,
+                    approved = TRUE,
+                    updated_at = NOW()
+                WHERE id = $2
+                `,
+                [
+                    content,
+                    keepId
+                ]
+            );
+
+            console.log(
+                `🔄 Updated knowledge: ${title}`
+            );
+
+            return "updated";
+        }
+
+        /*
+         * Create it if it doesn't exist.
+         */
         await db.query(
             `
             INSERT INTO knowledge (
@@ -345,72 +416,51 @@ async function saveKnowledge(
             ]
         );
 
-        return true;
+        console.log(
+            `🧠 Created knowledge: ${title}`
+        );
+
+        return "created";
+
     } catch (error) {
         console.error(
-            `❌ Could not save knowledge from #${channel.name}:`,
+            `❌ Could not save knowledge for #${channel.name}:`,
             error
         );
 
-        return false;
+        return "failed";
     }
 }
 
 /*
- * Send an embed only if the channel does not already contain
- * a Resolve setup message.
+ * Check whether our setup message already exists.
  */
-async function sendSetupEmbed(
+async function hasSetupMessage(
     guild,
     channel,
-    key,
-    embed,
-    knowledgeTitle,
-    knowledgeContent
+    title
 ) {
     try {
-        const recent =
+        const messages =
             await channel.messages.fetch({
                 limit: 50
             });
 
-        const alreadyExists =
-            recent.some(
-                message =>
-                    message.author.id ===
-                        guild.client.user.id &&
-                    message.embeds.some(
-                        existing =>
-                            existing.data?.footer?.text ===
-                            "Resolve • Official Server Setup" &&
-                            existing.data?.title ===
-                            embed.data?.title
-                    )
-            );
-
-        if (alreadyExists) {
-            return false;
-        }
-
-        await channel.send({
-            embeds: [embed]
-        });
-
-        await saveKnowledge(
-            guild,
-            channel,
-            knowledgeTitle,
-            knowledgeContent
+        return messages.some(
+            message =>
+                message.author.id ===
+                    guild.client.user.id &&
+                message.embeds.some(
+                    embed =>
+                        embed.title ===
+                        title &&
+                        embed.footer?.text ===
+                        "Resolve • Official Server Setup"
+                )
         );
-
-        console.log(
-            `🧠 Added setup knowledge: #${channel.name}`
-        );
-
-        return true;
     } catch (error) {
         console.error(
-            `❌ Could not send setup content to #${channel.name}:`,
+            `⚠️ Could not check #${channel.name}:`,
             error
         );
 
@@ -419,69 +469,133 @@ async function sendSetupEmbed(
 }
 
 /*
- * Common footer.
+ * Send official information and save it to knowledge.
  */
-function setupFooter() {
-    return {
-        text:
-            "Resolve • Official Server Setup"
-    };
+async function sendOfficialInfo(
+    guild,
+    channel,
+    title,
+    description,
+    knowledgeTitle,
+    knowledgeContent,
+    fields = []
+) {
+    try {
+        const exists =
+            await hasSetupMessage(
+                guild,
+                channel,
+                title
+            );
+
+        /*
+         * If the message already exists,
+         * still make sure knowledge exists/gets updated.
+         */
+        if (!exists) {
+            const embed =
+                new EmbedBuilder()
+                    .setTitle(title)
+                    .setDescription(
+                        description
+                    )
+                    .addFields(fields)
+                    .setFooter({
+                        text:
+                            "Resolve • Official Server Setup"
+                    })
+                    .setTimestamp();
+
+            await channel.send({
+                embeds: [embed]
+            });
+
+            console.log(
+                `📢 Sent ${title} to #${channel.name}`
+            );
+        }
+
+        /*
+         * Always update the database entry.
+         */
+        const result =
+            await saveOfficialKnowledge(
+                guild,
+                channel,
+                knowledgeTitle,
+                knowledgeContent
+            );
+
+        return {
+            sent: !exists,
+            result
+        };
+
+    } catch (error) {
+        console.error(
+            `❌ Failed to setup #${channel.name}:`,
+            error
+        );
+
+        return {
+            sent: false,
+            result: "failed"
+        };
+    }
 }
 
 /*
- * WELCOME
+ * =========================================================
+ * OFFICIAL CONTENT
+ * =========================================================
  */
+
 async function setupWelcome(
     guild,
     channel
 ) {
-    const embed =
-        new EmbedBuilder()
-            .setTitle(
-                "👋 Welcome to Resolve!"
-            )
-            .setDescription(
-                "Welcome to the official Resolve Support Server!\n\n" +
-                "Resolve is an AI-powered support platform built to help Discord communities provide faster, smarter support."
-            )
-            .addFields(
-                {
-                    name: "🤖 What is Resolve?",
-                    value:
-                        "Resolve helps Discord servers manage support tickets, answer questions using approved knowledge, and connect users with human Support Teams when needed."
-                },
-                {
-                    name: "🎫 Need Support?",
-                    value:
-                        "Visit 🎫・support to get help with Resolve."
-                },
-                {
-                    name: "📚 Learn More",
-                    value:
-                        "Check 📜・rules, 🤖・about-resolve, ❓・faq, 📢・announcements, and 🚀・updates."
-                },
-                {
-                    name: "🏆 Achievements",
-                    value:
-                        "Participate in the community, use Resolve, open tickets, and unlock achievements."
-                }
-            )
-            .setFooter(setupFooter())
-            .setTimestamp();
-
-    return sendSetupEmbed(
+    return sendOfficialInfo(
         guild,
         channel,
-        "welcome",
-        embed,
+        "👋 Welcome to Resolve!",
+        "Welcome to the official Resolve Support Server!",
         "Official Knowledge • Welcome",
-        "Welcome to the official Resolve Support Server. Resolve is an AI-powered support platform built to help Discord communities provide faster, smarter support. Members can learn about Resolve, get support, read FAQs, view updates, and participate in the community."
+        `
+WELCOME TO RESOLVE
+
+Welcome to the official Resolve Support Server.
+
+Resolve is an AI-powered support platform built to help Discord communities provide faster and smarter support.
+
+Members can learn about Resolve, get support, read the FAQ, view announcements and updates, report bugs, submit suggestions, participate in events, and earn achievements.
+
+Important information can be automatically used by Resolve's AI support system.
+`,
+        [
+            {
+                name: "🤖 What is Resolve?",
+                value:
+                    "Resolve provides AI-powered support for Discord communities."
+            },
+            {
+                name: "🎫 Need Support?",
+                value:
+                    "Visit 🎫・support."
+            },
+            {
+                name: "📚 Learn More",
+                value:
+                    "Read 📜・rules, 🤖・about-resolve, and ❓・faq."
+            },
+            {
+                name: "🏆 Achievements",
+                value:
+                    "Participate in the community and use Resolve to unlock achievements."
+            }
+        ]
     );
 }
 
-/*
- * RULES
- */
 async function setupRules(
     guild,
     channel
@@ -498,7 +612,7 @@ Treat members, Support Team members, moderators, developers, and staff with resp
 Do not spam messages, mentions, reactions, commands, or channels.
 
 3. USE THE CORRECT CHANNELS
-Keep questions, bugs, suggestions, events, general conversation, and support requests in their appropriate channels.
+Keep questions, bugs, suggestions, events, general conversations, and support requests in their appropriate channels.
 
 4. SUPPORT TICKETS
 Explain your issue clearly, provide useful information, do not create duplicate tickets, and be patient while waiting for support.
@@ -516,7 +630,7 @@ Suggestions are welcome. Explain what you want changed or added and why it would
 Do not advertise unrelated servers, bots, products, services, or communities unless specifically permitted.
 
 9. KEEP CONTENT APPROPRIATE
-Keep content appropriate for the community and do not post harmful or otherwise inappropriate material.
+Keep content appropriate for the community.
 
 10. FOLLOW DISCORD RULES
 All members must follow Discord's Terms of Service and Community Guidelines.
@@ -540,62 +654,41 @@ Violations may result in warnings, message removal, restrictions, kicks, bans, o
 Rules may change as Resolve develops. Important changes will be announced in 📢・announcements or 🚀・updates.
 
 17. RESOLVE AI
-Resolve should only provide server-specific information when reliable approved knowledge is available. If it does not know something, it should request human support rather than guess.
-
-Thank you for being part of the Resolve community.
+Resolve should only provide server-specific information when reliable approved knowledge is available. If it does not know something, it should request human support instead of guessing.
 `;
 
-    const embed =
-        new EmbedBuilder()
-            .setTitle(
-                "📜 Resolve Community Rules"
-            )
-            .setDescription(
-                "Please read and follow the official Resolve community rules."
-            )
-            .addFields(
-                {
-                    name: "🤝 Respect",
-                    value:
-                        "Be respectful to members and staff."
-                },
-                {
-                    name: "🚫 No Spam",
-                    value:
-                        "Do not spam messages, mentions, reactions, commands, or channels."
-                },
-                {
-                    name: "🎫 Support",
-                    value:
-                        "Use tickets correctly and provide useful information."
-                },
-                {
-                    name: "🤖 AI",
-                    value:
-                        "Resolve must not invent server-specific information."
-                },
-                {
-                    name: "📢 Updates",
-                    value:
-                        "Rule changes will be announced through official channels."
-                }
-            )
-            .setFooter(setupFooter())
-            .setTimestamp();
-
-    return sendSetupEmbed(
+    return sendOfficialInfo(
         guild,
         channel,
-        "rules",
-        embed,
+        "📜 Resolve Community Rules",
+        "Please read and follow the official Resolve community rules.",
         "Official Knowledge • Community Rules",
-        content
+        content,
+        [
+            {
+                name: "🤝 Respect",
+                value:
+                    "Treat members and staff respectfully."
+            },
+            {
+                name: "🚫 No Spam",
+                value:
+                    "Do not spam messages, mentions, reactions, commands, or channels."
+            },
+            {
+                name: "🎫 Support",
+                value:
+                    "Use tickets correctly and provide useful information."
+            },
+            {
+                name: "🤖 AI",
+                value:
+                    "Resolve must not invent server-specific information."
+            }
+        ]
     );
 }
 
-/*
- * ABOUT RESOLVE
- */
 async function setupAbout(
     guild,
     channel
@@ -620,58 +713,44 @@ KNOWLEDGE SYSTEM
 Resolve can use approved rules, FAQs, announcements, updates, changelogs, events, support information, achievements, bug information, and suggestions.
 
 AUTOMATIC KNOWLEDGE
-Important information from official member-facing channels can be automatically added to Resolve's knowledge system.
+Important information from official member-facing channels can automatically be added to Resolve's knowledge system.
 
 NO GUESSING
 Resolve should never invent server-specific rules, policies, dates, prices, commands, or procedures.
 `;
 
-    const embed =
-        new EmbedBuilder()
-            .setTitle(
-                "🤖 About Resolve"
-            )
-            .setDescription(
-                "AI-powered support for Discord communities."
-            )
-            .addFields(
-                {
-                    name: "🧠 AI Support",
-                    value:
-                        "Answers support questions using approved server knowledge."
-                },
-                {
-                    name: "🎫 Support Tickets",
-                    value:
-                        "Members can receive support through tickets."
-                },
-                {
-                    name: "👤 Human Handoff",
-                    value:
-                        "Unknown or uncertain questions can be sent to human Support Team members."
-                },
-                {
-                    name: "📚 Knowledge",
-                    value:
-                        "Resolve can learn important information from official support-server channels."
-                }
-            )
-            .setFooter(setupFooter())
-            .setTimestamp();
-
-    return sendSetupEmbed(
+    return sendOfficialInfo(
         guild,
         channel,
-        "about",
-        embed,
+        "🤖 About Resolve",
+        "AI-powered support for Discord communities.",
         "Official Knowledge • About Resolve",
-        content
+        content,
+        [
+            {
+                name: "🧠 AI Support",
+                value:
+                    "Answers support questions using approved server knowledge."
+            },
+            {
+                name: "🎫 Support Tickets",
+                value:
+                    "Members can receive support through tickets."
+            },
+            {
+                name: "👤 Human Handoff",
+                value:
+                    "Unknown or uncertain questions can be sent to human Support Team members."
+            },
+            {
+                name: "📚 Knowledge",
+                value:
+                    "Resolve can learn important information from official support-server channels."
+            }
+        ]
     );
 }
 
-/*
- * ANNOUNCEMENTS
- */
 async function setupAnnouncements(
     guild,
     channel
@@ -679,49 +758,37 @@ async function setupAnnouncements(
     const content = `
 RESOLVE ANNOUNCEMENTS
 
-This channel is used for important official announcements from the Resolve team.
+This channel contains official announcements from the Resolve team.
 
 Announcements may include:
 
 • Major Resolve news
 • Important service information
 • Community announcements
-• Important policy changes
+• Policy changes
 • Major feature releases
 • Service notices
 
 Members should check this channel for official Resolve announcements.
 `;
 
-    const embed =
-        new EmbedBuilder()
-            .setTitle(
-                "📢 Resolve Announcements"
-            )
-            .setDescription(
-                "Official announcements and important news from the Resolve team will be posted here."
-            )
-            .addFields({
-                name: "🔔 Stay Updated",
-                value:
-                    "Check this channel regularly for important Resolve news and announcements."
-            })
-            .setFooter(setupFooter())
-            .setTimestamp();
-
-    return sendSetupEmbed(
+    return sendOfficialInfo(
         guild,
         channel,
-        "announcements",
-        embed,
+        "📢 Resolve Announcements",
+        "Official announcements and important news from the Resolve team will be posted here.",
         "Official Knowledge • Announcements",
-        content
+        content,
+        [
+            {
+                name: "🔔 Stay Updated",
+                value:
+                    "Check this channel for important Resolve news and announcements."
+            }
+        ]
     );
 }
 
-/*
- * UPDATES
- */
 async function setupUpdates(
     guild,
     channel
@@ -745,35 +812,23 @@ Updates may include:
 Check this channel to stay informed about changes to Resolve.
 `;
 
-    const embed =
-        new EmbedBuilder()
-            .setTitle(
-                "🚀 Resolve Updates"
-            )
-            .setDescription(
-                "Official product and community updates will be posted here."
-            )
-            .addFields({
+    return sendOfficialInfo(
+        guild,
+        channel,
+        "🚀 Resolve Updates",
+        "Official product and community updates will be posted here.",
+        "Official Knowledge • Updates",
+        content,
+        [
+            {
                 name: "🚀 What's New?",
                 value:
                     "New Resolve features, improvements, and important changes will be shared here."
-            })
-            .setFooter(setupFooter())
-            .setTimestamp();
-
-    return sendSetupEmbed(
-        guild,
-        channel,
-        "updates",
-        embed,
-        "Official Knowledge • Updates",
-        content
+            }
+        ]
     );
 }
 
-/*
- * CHANGELOG
- */
 async function setupChangelog(
     guild,
     channel
@@ -792,40 +847,28 @@ Changelog entries may include:
 • AI changes
 • Ticket system changes
 • Dashboard changes
-• Database or infrastructure improvements
+• Infrastructure improvements
 
 The newest changelog entries should be posted in this channel.
 `;
 
-    const embed =
-        new EmbedBuilder()
-            .setTitle(
-                "📝 Resolve Changelog"
-            )
-            .setDescription(
-                "A history of important changes to Resolve."
-            )
-            .addFields({
+    return sendOfficialInfo(
+        guild,
+        channel,
+        "📝 Resolve Changelog",
+        "A history of important changes to Resolve.",
+        "Official Knowledge • Changelog",
+        content,
+        [
+            {
                 name: "📋 Changes",
                 value:
                     "New features, fixes, improvements, and system changes will be documented here."
-            })
-            .setFooter(setupFooter())
-            .setTimestamp();
-
-    return sendSetupEmbed(
-        guild,
-        channel,
-        "changelog",
-        embed,
-        "Official Knowledge • Changelog",
-        content
+            }
+        ]
     );
 }
 
-/*
- * SUPPORT
- */
 async function setupSupport(
     guild,
     channel
@@ -842,7 +885,7 @@ SUPPORT PROCESS
 3. Provide relevant information.
 4. Resolve will attempt to help using approved server knowledge.
 5. If Resolve cannot confidently answer, human support may be requested.
-6. A member of the Support Team can then assist.
+6. A member of the Support Team can assist.
 
 TICKET GUIDELINES
 
@@ -857,47 +900,33 @@ For suggestions, use 💡・suggestions.
 For general information, check ❓・faq.
 `;
 
-    const embed =
-        new EmbedBuilder()
-            .setTitle(
-                "🎫 Resolve Support"
-            )
-            .setDescription(
-                "Need help with Resolve? Use the support system to get assistance."
-            )
-            .addFields(
-                {
-                    name: "1️⃣ Open a Ticket",
-                    value:
-                        "Create a support ticket and explain your issue."
-                },
-                {
-                    name: "2️⃣ Resolve Helps",
-                    value:
-                        "Resolve will use approved knowledge to try to answer."
-                },
-                {
-                    name: "3️⃣ Human Support",
-                    value:
-                        "If Resolve cannot confidently help, the Support Team can take over."
-                }
-            )
-            .setFooter(setupFooter())
-            .setTimestamp();
-
-    return sendSetupEmbed(
+    return sendOfficialInfo(
         guild,
         channel,
-        "support",
-        embed,
+        "🎫 Resolve Support",
+        "Need help with Resolve? Use the support system to get assistance.",
         "Official Knowledge • Support",
-        content
+        content,
+        [
+            {
+                name: "1️⃣ Open a Ticket",
+                value:
+                    "Create a support ticket and explain your issue."
+            },
+            {
+                name: "2️⃣ Resolve Helps",
+                value:
+                    "Resolve uses approved knowledge to try to answer."
+            },
+            {
+                name: "3️⃣ Human Support",
+                value:
+                    "If Resolve cannot confidently help, the Support Team can take over."
+            }
+        ]
     );
 }
 
-/*
- * FAQ
- */
 async function setupFAQ(
     guild,
     channel
@@ -912,7 +941,7 @@ Q: WHAT DOES RESOLVE DO?
 A: Resolve helps communities manage support tickets and answer questions using approved knowledge.
 
 Q: HOW DOES THE AI KNOW SERVER INFORMATION?
-A: Resolve can use approved knowledge containing information such as rules, FAQs, announcements, updates, changelogs, events, and support information.
+A: Resolve can use approved knowledge containing rules, FAQs, announcements, updates, changelogs, events, and support information.
 
 Q: DOES RESOLVE GUESS ANSWERS?
 A: Resolve should not guess server-specific information. If it does not have enough reliable information, it should request human support.
@@ -936,57 +965,33 @@ Q: WHERE ARE THE RULES?
 A: Check 📜・rules.
 `;
 
-    const embed =
-        new EmbedBuilder()
-            .setTitle(
-                "❓ Resolve FAQ"
-            )
-            .setDescription(
-                "Frequently asked questions about Resolve."
-            )
-            .addFields(
-                {
-                    name: "🤖 What is Resolve?",
-                    value:
-                        "An AI-powered support bot for Discord communities."
-                },
-                {
-                    name: "🧠 How does it know information?",
-                    value:
-                        "It uses approved server knowledge."
-                },
-                {
-                    name: "👤 What if it doesn't know?",
-                    value:
-                        "It can request human support instead of guessing."
-                },
-                {
-                    name: "🐛 Bugs",
-                    value:
-                        "Report them in 🐛・bug-reports."
-                },
-                {
-                    name: "💡 Suggestions",
-                    value:
-                        "Post them in 💡・suggestions."
-                }
-            )
-            .setFooter(setupFooter())
-            .setTimestamp();
-
-    return sendSetupEmbed(
+    return sendOfficialInfo(
         guild,
         channel,
-        "faq",
-        embed,
+        "❓ Resolve FAQ",
+        "Frequently asked questions about Resolve.",
         "Official Knowledge • FAQ",
-        content
+        content,
+        [
+            {
+                name: "🤖 What is Resolve?",
+                value:
+                    "An AI-powered support bot for Discord communities."
+            },
+            {
+                name: "🧠 How does it know information?",
+                value:
+                    "It uses approved server knowledge."
+            },
+            {
+                name: "👤 What if it doesn't know?",
+                value:
+                    "It can request human support instead of guessing."
+            }
+        ]
     );
 }
 
-/*
- * ACHIEVEMENTS
- */
 async function setupAchievements(
     guild,
     channel
@@ -998,7 +1003,7 @@ Resolve has a community achievement system.
 
 Achievements can be earned by participating in the Resolve community and using Resolve's features.
 
-EXAMPLES OF ACHIEVEMENT CATEGORIES
+ACHIEVEMENT CATEGORIES
 
 👋 COMMUNITY
 Joining and participating in the Resolve community.
@@ -1016,61 +1021,47 @@ Using Resolve's AI support functionality.
 Participating in community conversations.
 
 🏆 MILESTONES
-Reaching larger activity milestones can unlock special achievements.
+Reaching activity milestones can unlock special achievements.
 
 💎 ACHIEVEMENT MASTER
-Special achievement milestones may be awarded for collecting many achievements.
+A special achievement milestone for collecting many achievements.
 
 👑 RESOLVE OG
 A special early-community achievement.
 `;
 
-    const embed =
-        new EmbedBuilder()
-            .setTitle(
-                "🏆 Resolve Achievements"
-            )
-            .setDescription(
-                "Participate in the community and use Resolve to unlock achievements."
-            )
-            .addFields(
-                {
-                    name: "👋 Community",
-                    value:
-                        "Participate in the Resolve community."
-                },
-                {
-                    name: "🎫 Support",
-                    value:
-                        "Use the support system."
-                },
-                {
-                    name: "🧠 Knowledge",
-                    value:
-                        "Use Resolve and its knowledge features."
-                },
-                {
-                    name: "💎 Milestones",
-                    value:
-                        "Reach activity milestones to unlock special achievements."
-                }
-            )
-            .setFooter(setupFooter())
-            .setTimestamp();
-
-    return sendSetupEmbed(
+    return sendOfficialInfo(
         guild,
         channel,
-        "achievements",
-        embed,
+        "🏆 Resolve Achievements",
+        "Participate in the community and use Resolve to unlock achievements.",
         "Official Knowledge • Achievements",
-        content
+        content,
+        [
+            {
+                name: "👋 Community",
+                value:
+                    "Participate in the Resolve community."
+            },
+            {
+                name: "🎫 Support",
+                value:
+                    "Use the support system."
+            },
+            {
+                name: "🧠 Knowledge",
+                value:
+                    "Use Resolve and its knowledge features."
+            },
+            {
+                name: "💎 Milestones",
+                value:
+                    "Reach activity milestones to unlock special achievements."
+            }
+        ]
     );
 }
 
-/*
- * EVENTS
- */
 async function setupEvents(
     guild,
     channel
@@ -1094,35 +1085,23 @@ Always check this channel for current event information.
 Event information can change, so the newest official event announcement should be treated as the most current information.
 `;
 
-    const embed =
-        new EmbedBuilder()
-            .setTitle(
-                "🎉 Resolve Events"
-            )
-            .setDescription(
-                "Official Resolve community events will be announced here."
-            )
-            .addFields({
+    return sendOfficialInfo(
+        guild,
+        channel,
+        "🎉 Resolve Events",
+        "Official Resolve community events will be announced here.",
+        "Official Knowledge • Events",
+        content,
+        [
+            {
                 name: "🎉 Community Events",
                 value:
                     "Check this channel for current events, activities, competitions, and special community announcements."
-            })
-            .setFooter(setupFooter())
-            .setTimestamp();
-
-    return sendSetupEmbed(
-        guild,
-        channel,
-        "events",
-        embed,
-        "Official Knowledge • Events",
-        content
+            }
+        ]
     );
 }
 
-/*
- * SUGGESTIONS
- */
 async function setupSuggestions(
     guild,
     channel
@@ -1144,47 +1123,33 @@ Suggestions are reviewed by the Resolve team.
 Submitting a suggestion does not guarantee that it will be implemented.
 `;
 
-    const embed =
-        new EmbedBuilder()
-            .setTitle(
-                "💡 Resolve Suggestions"
-            )
-            .setDescription(
-                "Have an idea for improving Resolve? Share it here."
-            )
-            .addFields(
-                {
-                    name: "💡 Explain Your Idea",
-                    value:
-                        "Clearly describe what you want added or changed."
-                },
-                {
-                    name: "📈 Explain the Benefit",
-                    value:
-                        "Tell the team why your idea would improve Resolve."
-                },
-                {
-                    name: "📋 Review",
-                    value:
-                        "Suggestions are reviewed by the Resolve team and are not guaranteed to be implemented."
-                }
-            )
-            .setFooter(setupFooter())
-            .setTimestamp();
-
-    return sendSetupEmbed(
+    return sendOfficialInfo(
         guild,
         channel,
-        "suggestions",
-        embed,
+        "💡 Resolve Suggestions",
+        "Have an idea for improving Resolve? Share it here.",
         "Official Knowledge • Suggestions",
-        content
+        content,
+        [
+            {
+                name: "💡 Explain Your Idea",
+                value:
+                    "Clearly describe what you want added or changed."
+            },
+            {
+                name: "📈 Explain the Benefit",
+                value:
+                    "Tell the team why your idea would improve Resolve."
+            },
+            {
+                name: "📋 Review",
+                value:
+                    "Suggestions are reviewed by the Resolve team and are not guaranteed to be implemented."
+            }
+        ]
     );
 }
 
-/*
- * BUG REPORTS
- */
 async function setupBugReports(
     guild,
     channel
@@ -1207,87 +1172,66 @@ DO NOT INTENTIONALLY ABUSE OR EXPLOIT A BUG.
 
 Serious security issues should be reported privately through the appropriate Resolve support process.
 
-Bug reports may be reviewed, investigated, and added to the official Resolve updates or changelog when appropriate.
+Bug reports may be reviewed, investigated, and added to official Resolve updates or changelog information when appropriate.
 `;
 
-    const embed =
-        new EmbedBuilder()
-            .setTitle(
-                "🐛 Resolve Bug Reports"
-            )
-            .setDescription(
-                "Found a bug? Please report it with as much useful information as possible."
-            )
-            .addFields(
-                {
-                    name: "1️⃣ Explain the Problem",
-                    value:
-                        "Tell us exactly what happened."
-                },
-                {
-                    name: "2️⃣ Explain Expected Behavior",
-                    value:
-                        "Tell us what you expected to happen."
-                },
-                {
-                    name: "3️⃣ Reproduction",
-                    value:
-                        "Include steps that can help the team reproduce the issue."
-                },
-                {
-                    name: "📸 Evidence",
-                    value:
-                        "Screenshots and other relevant information can help."
-                }
-            )
-            .setFooter(setupFooter())
-            .setTimestamp();
-
-    return sendSetupEmbed(
+    return sendOfficialInfo(
         guild,
         channel,
-        "bugs",
-        embed,
+        "🐛 Resolve Bug Reports",
+        "Found a bug? Please report it with as much useful information as possible.",
         "Official Knowledge • Bug Reports",
-        content
+        content,
+        [
+            {
+                name: "1️⃣ Explain the Problem",
+                value:
+                    "Tell us exactly what happened."
+            },
+            {
+                name: "2️⃣ Expected Behavior",
+                value:
+                    "Tell us what you expected to happen."
+            },
+            {
+                name: "3️⃣ Reproduction",
+                value:
+                    "Include steps that can help reproduce the issue."
+            }
+        ]
     );
 }
 
 /*
- * Send a simple information embed to channels
- * that don't need a full knowledge source.
+ * Simple community channels.
  */
 async function setupSimpleChannel(
     guild,
     channel,
     title,
-    description
+    description,
+    knowledgeTitle
 ) {
-    const embed =
-        new EmbedBuilder()
-            .setTitle(title)
-            .setDescription(description)
-            .setFooter(setupFooter())
-            .setTimestamp();
-
-    return sendSetupEmbed(
+    return sendOfficialInfo(
         guild,
         channel,
         title,
-        embed,
-        `Official Knowledge • ${title}`,
+        description,
+        knowledgeTitle,
         description
     );
 }
 
 /*
- * Setup all official knowledge content.
+ * Populate all official information.
  */
-async function populateKnowledgeChannels(
+async function populateInformation(
     guild,
     channels
 ) {
     let sent = 0;
+    let createdKnowledge = 0;
+    let updatedKnowledge = 0;
 
     const handlers = {
         "👋・welcome":
@@ -1333,41 +1277,58 @@ async function populateKnowledgeChannels(
                 channel
             );
 
-        if (result) {
+        if (result?.sent) {
             sent++;
+        }
+
+        if (
+            result?.result ===
+            "created"
+        ) {
+            createdKnowledge++;
+        }
+
+        if (
+            result?.result ===
+            "updated"
+        ) {
+            updatedKnowledge++;
         }
     }
 
     /*
-     * Simple informational channels.
+     * Additional member-facing channels.
      */
     const simpleChannels = [
-        [
-            "🎭・reaction-roles",
-            "🎭 Reaction Roles",
-            "Use the available reaction roles to customize your Resolve community experience."
-        ],
-        [
-            "🎨・colors",
-            "🎨 Color Roles",
-            "Choose an available color role to customize your server profile."
-        ],
-        [
-            "🖼️・showcase",
-            "🖼️ Community Showcase",
-            "Share appropriate community creations and projects here."
-        ]
+        {
+            name: "🎭・reaction-roles",
+            title: "🎭 Reaction Roles",
+            description:
+                "Use the available reaction roles to customize your Resolve community experience.",
+            knowledgeTitle:
+                "Official Knowledge • Reaction Roles"
+        },
+        {
+            name: "🎨・colors",
+            title: "🎨 Color Roles",
+            description:
+                "Choose an available color role to customize your server profile.",
+            knowledgeTitle:
+                "Official Knowledge • Color Roles"
+        },
+        {
+            name: "🖼️・showcase",
+            title: "🖼️ Community Showcase",
+            description:
+                "Share appropriate community creations and projects here.",
+            knowledgeTitle:
+                "Official Knowledge • Community Showcase"
+        }
     ];
 
-    for (
-        const [
-            channelName,
-            title,
-            description
-        ] of simpleChannels
-    ) {
+    for (const item of simpleChannels) {
         const channel =
-            channels.get(channelName);
+            channels.get(item.name);
 
         if (!channel) {
             continue;
@@ -1377,44 +1338,35 @@ async function populateKnowledgeChannels(
             await setupSimpleChannel(
                 guild,
                 channel,
-                title,
-                description
+                item.title,
+                item.description,
+                item.knowledgeTitle
             );
 
-        if (result) {
+        if (result?.sent) {
             sent++;
+        }
+
+        if (
+            result?.result ===
+            "created"
+        ) {
+            createdKnowledge++;
+        }
+
+        if (
+            result?.result ===
+            "updated"
+        ) {
+            updatedKnowledge++;
         }
     }
 
-    return sent;
-}
-
-/*
- * Make sure old automatic knowledge is not
- * duplicated by a previous server setup.
- */
-async function cleanupOldSetupKnowledge(
-    guild
-) {
-    try {
-        await db.query(
-            `
-            DELETE FROM knowledge
-            WHERE guild_id = $1
-            AND title LIKE 'Official Knowledge •%'
-            `,
-            [guild.id]
-        );
-
-        console.log(
-            "🧹 Removed previous official setup knowledge."
-        );
-    } catch (error) {
-        console.error(
-            "⚠️ Could not clean previous setup knowledge:",
-            error
-        );
-    }
+    return {
+        sent,
+        createdKnowledge,
+        updatedKnowledge
+    };
 }
 
 /*
@@ -1447,7 +1399,7 @@ module.exports = {
             }
 
             /*
-             * Administrator or bot owner.
+             * Administrator / owner only.
              */
             if (
                 !canManageServer(interaction)
@@ -1490,7 +1442,7 @@ module.exports = {
                 await createRoles(guild);
 
             /*
-             * Channels.
+             * Server structure.
              */
             console.log(
                 "🏗️ Creating server structure..."
@@ -1552,7 +1504,7 @@ module.exports = {
             }
 
             /*
-             * Find support role.
+             * Support role.
              */
             const supportRole =
                 guild.roles.cache.find(
@@ -1565,7 +1517,8 @@ module.exports = {
                 await db.query(
                     `
                     UPDATE guild_settings
-                    SET support_role_id = $1,
+                    SET
+                        support_role_id = $1,
                         updated_at = NOW()
                     WHERE guild_id = $2
                     `,
@@ -1577,30 +1530,20 @@ module.exports = {
             }
 
             /*
-             * Remove old official knowledge records.
-             *
-             * The actual setup messages are then inserted
-             * again below, giving us one clean source of truth.
-             */
-            await cleanupOldSetupKnowledge(
-                guild
-            );
-
-            /*
-             * Send all official information.
+             * Populate official information.
              */
             console.log(
                 "📚 Sending official Resolve information..."
             );
 
-            const informationSent =
-                await populateKnowledgeChannels(
+            const information =
+                await populateInformation(
                     guild,
                     channels
                 );
 
             /*
-             * Report.
+             * Final response.
              */
             const embed =
                 new EmbedBuilder()
@@ -1608,7 +1551,7 @@ module.exports = {
                         "✅ Resolve Server Setup Complete"
                     )
                     .setDescription(
-                        "The official Resolve Support Server has been configured and its information has been added to the AI knowledge base."
+                        "The official Resolve Support Server is configured and its official information is stored in the AI knowledge base."
                     )
                     .addFields(
                         {
@@ -1628,7 +1571,13 @@ module.exports = {
                         {
                             name: "🧠 Knowledge",
                             value:
-                                `${informationSent} information sections sent and saved`,
+                                `${information.createdKnowledge} created\n${information.updatedKnowledge} updated`,
+                            inline: true
+                        },
+                        {
+                            name: "📢 Messages",
+                            value:
+                                `${information.sent} new information messages sent`,
                             inline: true
                         },
                         {
@@ -1658,7 +1607,11 @@ module.exports = {
             );
 
             console.log(
-                `📚 Information sections sent: ${informationSent}`
+                `🧠 Knowledge created: ${information.createdKnowledge}`
+            );
+
+            console.log(
+                `🔄 Knowledge updated: ${information.updatedKnowledge}`
             );
 
             console.log(
