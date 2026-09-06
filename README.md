@@ -19,4 +19,4 @@ AI-powered support bot for Discord servers.
 Install dependencies:
 
 ```bash
-npm install
+npm install# ai-support-bot-
