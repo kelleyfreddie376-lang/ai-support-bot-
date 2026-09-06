@@ -9,6 +9,7 @@ const {
 
 const commands = require("../commands");
 const db = require("../database/db");
+const { awardAchievement } = require("../services/achievements");
 
 module.exports = {
     name: "interactionCreate",
@@ -510,6 +511,20 @@ module.exports = {
                         `✅ Your ticket has been created: ${ticketChannel}`
                 });
 
+                // ==========================================
+                // FIRST TICKET ACHIEVEMENT
+                // ==========================================
+
+                await awardAchievement({
+                    guild: interaction.guild,
+                    userId: interaction.user.id,
+                    key: "first_ticket",
+                    name: "First Ticket",
+                    description:
+                        "You opened your first support ticket with Resolve!",
+                    emoji: "🎫"
+                });
+
                 console.log(
                     `🎫 Ticket created: ${ticketChannel.name} | Priority: ${priority}`
                 );
@@ -547,9 +562,6 @@ module.exports = {
 
             try {
 
-                // IMPORTANT:
-                // Tickets in BOTH open and human states
-                // can be claimed.
                 const ticketResult = await db.query(
                     `
                     SELECT *
@@ -570,10 +582,6 @@ module.exports = {
                 }
 
                 const ticket = ticketResult.rows[0];
-
-                // ==========================================
-                // GET SUPPORT ROLE
-                // ==========================================
 
                 const settingsResult = await db.query(
                     `
@@ -607,10 +615,6 @@ module.exports = {
                     });
                 }
 
-                // ==========================================
-                // CHECK IF ALREADY CLAIMED
-                // ==========================================
-
                 if (ticket.claimed_by) {
                     return interaction.reply({
                         content:
@@ -618,10 +622,6 @@ module.exports = {
                         ephemeral: true
                     });
                 }
-
-                // ==========================================
-                // CLAIM TICKET
-                // ==========================================
 
                 await db.query(
                     `
@@ -636,10 +636,6 @@ module.exports = {
                         ticket.id
                     ]
                 );
-
-                // ==========================================
-                // CLAIM EMBED
-                // ==========================================
 
                 const embed = new EmbedBuilder()
                     .setTitle("👤 Ticket Claimed")
@@ -710,10 +706,6 @@ module.exports = {
 
                 const ticket = ticketResult.rows[0];
 
-                // ==========================================
-                // GET SUPPORT ROLE
-                // ==========================================
-
                 const settingsResult = await db.query(
                     `
                     SELECT support_role_id
@@ -749,10 +741,6 @@ module.exports = {
                     });
                 }
 
-                // ==========================================
-                // CLOSE DATABASE TICKET
-                // ==========================================
-
                 await db.query(
                     `
                     UPDATE tickets
@@ -762,10 +750,6 @@ module.exports = {
                     `,
                     [ticket.id]
                 );
-
-                // ==========================================
-                // CLOSED EMBED
-                // ==========================================
 
                 const closedEmbed = new EmbedBuilder()
                     .setTitle("🔒 Ticket Closed")
@@ -782,20 +766,12 @@ module.exports = {
                     embeds: [closedEmbed]
                 });
 
-                // ==========================================
-                // HIDE TICKET FROM USER
-                // ==========================================
-
                 await interaction.channel.permissionOverwrites.edit(
                     ticket.user_id,
                     {
                         ViewChannel: false
                     }
                 );
-
-                // ==========================================
-                // REMOVE BUTTONS
-                // ==========================================
 
                 await interaction.message.edit({
                     components: []
