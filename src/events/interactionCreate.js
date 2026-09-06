@@ -291,14 +291,26 @@ module.exports = {
                 urgent: "🔴 Urgent"
             };
 
+            if (!priorityNames[priority]) {
+                return interaction.reply({
+                    content: "❌ Invalid ticket priority.",
+                    ephemeral: true
+                });
+            }
+
             try {
+
+                // ==========================================
+                // CHECK FOR EXISTING TICKET
+                // ==========================================
+
                 const existingTicket = await db.query(
                     `
                     SELECT *
                     FROM tickets
                     WHERE guild_id = $1
                     AND user_id = $2
-                    AND status = 'open'
+                    AND status IN ('open', 'human')
                     LIMIT 1
                     `,
                     [
@@ -308,18 +320,28 @@ module.exports = {
                 );
 
                 if (existingTicket.rows.length > 0) {
+
+                    const existing = existingTicket.rows[0];
+
                     return interaction.reply({
                         content:
-                            "❌ You already have an open support ticket.",
+                            existing.status === "human"
+                                ? "❌ You already have a support ticket waiting for the Support Team."
+                                : "❌ You already have an open support ticket.",
                         ephemeral: true
                     });
                 }
+
+                // ==========================================
+                // GET SERVER SETTINGS
+                // ==========================================
 
                 const settingsResult = await db.query(
                     `
                     SELECT support_role_id, ticket_category_id
                     FROM guild_settings
                     WHERE guild_id = $1
+                    LIMIT 1
                     `,
                     [interaction.guild.id]
                 );
@@ -355,6 +377,10 @@ module.exports = {
                 await interaction.deferReply({
                     ephemeral: true
                 });
+
+                // ==========================================
+                // CREATE TICKET CHANNEL
+                // ==========================================
 
                 const ticketChannel =
                     await interaction.guild.channels.create({
@@ -392,6 +418,10 @@ module.exports = {
                         ]
                     });
 
+                // ==========================================
+                // SAVE TICKET
+                // ==========================================
+
                 await db.query(
                     `
                     INSERT INTO tickets (
@@ -411,23 +441,40 @@ module.exports = {
                     ]
                 );
 
+                // ==========================================
+                // TICKET EMBED
+                // ==========================================
+
                 const embed = new EmbedBuilder()
                     .setTitle("🎫 Support Ticket")
                     .setDescription(
                         `Welcome <@${interaction.user.id}>!\n\n` +
-                        "A member of the Support Team will assist you shortly.\n\n" +
+                        "Resolve AI is now available to help with your issue.\n\n" +
                         `**Priority:** ${priorityNames[priority]}\n\n` +
                         "Please describe your issue below."
                     )
-                    .addFields({
-                        name: "🤖 Resolve",
-                        value:
-                            "AI-powered support is available in this ticket."
-                    })
+                    .addFields(
+                        {
+                            name: "🤖 Resolve AI",
+                            value:
+                                "Resolve will try to help first. If human support is required, the ticket will remain open and the Support Team will be notified.",
+                            inline: false
+                        },
+                        {
+                            name: "👤 Human Support",
+                            value:
+                                "A Support Team member can claim the ticket at any time.",
+                            inline: false
+                        }
+                    )
                     .setFooter({
                         text: "Resolve • AI Support"
                     })
                     .setTimestamp();
+
+                // ==========================================
+                // TICKET BUTTONS
+                // ==========================================
 
                 const buttons =
                     new ActionRowBuilder().addComponents(
@@ -443,6 +490,10 @@ module.exports = {
                             .setEmoji("🔒")
                             .setStyle(ButtonStyle.Danger)
                     );
+
+                // ==========================================
+                // SEND TICKET MESSAGE
+                // ==========================================
 
                 await ticketChannel.send({
                     content:
@@ -495,12 +546,16 @@ module.exports = {
         if (customId === "ticket_claim") {
 
             try {
+
+                // IMPORTANT:
+                // Tickets in BOTH open and human states
+                // can be claimed.
                 const ticketResult = await db.query(
                     `
                     SELECT *
                     FROM tickets
                     WHERE channel_id = $1
-                    AND status = 'open'
+                    AND status IN ('open', 'human')
                     LIMIT 1
                     `,
                     [interaction.channel.id]
@@ -509,18 +564,23 @@ module.exports = {
                 if (ticketResult.rows.length === 0) {
                     return interaction.reply({
                         content:
-                            "❌ This ticket is no longer open.",
+                            "❌ This ticket is already closed.",
                         ephemeral: true
                     });
                 }
 
                 const ticket = ticketResult.rows[0];
 
+                // ==========================================
+                // GET SUPPORT ROLE
+                // ==========================================
+
                 const settingsResult = await db.query(
                     `
                     SELECT support_role_id
                     FROM guild_settings
                     WHERE guild_id = $1
+                    LIMIT 1
                     `,
                     [interaction.guild.id]
                 );
@@ -547,6 +607,10 @@ module.exports = {
                     });
                 }
 
+                // ==========================================
+                // CHECK IF ALREADY CLAIMED
+                // ==========================================
+
                 if (ticket.claimed_by) {
                     return interaction.reply({
                         content:
@@ -555,14 +619,17 @@ module.exports = {
                     });
                 }
 
-                // Claiming a ticket hands it over to a human.
-                // This stops Resolve from responding with AI.
+                // ==========================================
+                // CLAIM TICKET
+                // ==========================================
+
                 await db.query(
                     `
                     UPDATE tickets
                     SET claimed_by = $1,
                         status = 'human'
                     WHERE id = $2
+                    AND status IN ('open', 'human')
                     `,
                     [
                         interaction.user.id,
@@ -570,11 +637,16 @@ module.exports = {
                     ]
                 );
 
+                // ==========================================
+                // CLAIM EMBED
+                // ==========================================
+
                 const embed = new EmbedBuilder()
                     .setTitle("👤 Ticket Claimed")
                     .setDescription(
                         `This ticket has been claimed by <@${interaction.user.id}>.\n\n` +
-                        "🤖 Resolve AI support has been paused for this ticket."
+                        "🤖 Resolve AI support has been paused.\n" +
+                        "👤 Human support is now handling this ticket."
                     )
                     .setFooter({
                         text: "Resolve • Human Support"
@@ -584,6 +656,10 @@ module.exports = {
                 await interaction.reply({
                     embeds: [embed]
                 });
+
+                console.log(
+                    `👤 Ticket ${ticket.id} claimed by ${interaction.user.tag}`
+                );
 
                 return;
 
@@ -612,6 +688,7 @@ module.exports = {
         if (customId === "ticket_close") {
 
             try {
+
                 const ticketResult = await db.query(
                     `
                     SELECT *
@@ -633,11 +710,16 @@ module.exports = {
 
                 const ticket = ticketResult.rows[0];
 
+                // ==========================================
+                // GET SUPPORT ROLE
+                // ==========================================
+
                 const settingsResult = await db.query(
                     `
                     SELECT support_role_id
                     FROM guild_settings
                     WHERE guild_id = $1
+                    LIMIT 1
                     `,
                     [interaction.guild.id]
                 );
@@ -667,6 +749,10 @@ module.exports = {
                     });
                 }
 
+                // ==========================================
+                // CLOSE DATABASE TICKET
+                // ==========================================
+
                 await db.query(
                     `
                     UPDATE tickets
@@ -677,11 +763,15 @@ module.exports = {
                     [ticket.id]
                 );
 
+                // ==========================================
+                // CLOSED EMBED
+                // ==========================================
+
                 const closedEmbed = new EmbedBuilder()
                     .setTitle("🔒 Ticket Closed")
                     .setDescription(
                         `This ticket was closed by <@${interaction.user.id}>.\n\n` +
-                        "Thank you for contacting support."
+                        "Thank you for contacting Resolve Support."
                     )
                     .setFooter({
                         text: "Resolve • AI Support"
@@ -692,6 +782,10 @@ module.exports = {
                     embeds: [closedEmbed]
                 });
 
+                // ==========================================
+                // HIDE TICKET FROM USER
+                // ==========================================
+
                 await interaction.channel.permissionOverwrites.edit(
                     ticket.user_id,
                     {
@@ -699,9 +793,17 @@ module.exports = {
                     }
                 );
 
+                // ==========================================
+                // REMOVE BUTTONS
+                // ==========================================
+
                 await interaction.message.edit({
                     components: []
                 });
+
+                console.log(
+                    `🔒 Ticket ${ticket.id} closed by ${interaction.user.tag}`
+                );
 
                 return;
 
