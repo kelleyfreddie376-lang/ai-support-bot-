@@ -1,1561 +1,550 @@
-const {
-    SlashCommandBuilder,
-    PermissionFlagsBits,
-    ChannelType,
-    EmbedBuilder,
-    ActionRowBuilder,
-    ButtonBuilder,
-    ButtonStyle
-} = require("discord.js");
-
+const { EmbedBuilder } = require("discord.js");
+const { askGemini } = require("../services/gemini");
 const db = require("../database/db");
+
+const {
+    checkMessageAchievements,
+    awardAchievement
+} = require("../services/achievements");
 
 const SUPPORT_SERVER_ID = "1545866787059671100";
 
 /*
-==================================================
-CATEGORIES
-==================================================
-*/
-
-const CATEGORIES = {
-    START: "📌 START HERE",
-    RESOLVE: "📢 RESOLVE",
-    SUPPORT: "🆘 SUPPORT",
-    ACHIEVEMENTS: "🏆 ACHIEVEMENTS",
-    COMMUNITY: "💬 COMMUNITY",
-    STAFF: "🔒 STAFF"
-};
-
-/*
-==================================================
-CHANNELS
-==================================================
-*/
-
-const CHANNELS = {
-    START: [
-        ["👋・welcome", "Welcome to the official Resolve Support Server."],
-        ["📜・rules", "Read the Resolve community rules."],
-        ["🤖・about-resolve", "Learn about Resolve."],
-        ["🎭・reaction-roles", "Choose your notification roles."],
-        ["🎨・colors", "Choose your server color."]
-    ],
-
-    RESOLVE: [
-        ["📢・announcements", "Official Resolve announcements."],
-        ["🚀・updates", "Resolve updates and news."],
-        ["📝・changelog", "Recent Resolve changes."]
-    ],
-
-    SUPPORT: [
-        ["🎫・support", "Open a support ticket."],
-        ["❓・faq", "Frequently asked questions."],
-        ["🐛・bug-reports", "Report Resolve bugs."],
-        ["💡・suggestions", "Suggest improvements."]
-    ],
-
-    ACHIEVEMENTS: [
-        ["🏆・achievements", "View available achievements."],
-        ["📜・achievement-log", "Recent achievement unlocks."]
-    ],
-
-    COMMUNITY: [
-        ["💬・general", "General community discussion."],
-        ["🎉・events", "Resolve community events."],
-        ["🖼️・showcase", "Showcase your work."]
-    ],
-
-    STAFF: [
-        ["💬・staff-chat", "Private staff discussion."],
-        ["📋・staff-logs", "Staff and bot logs."],
-        ["🛡️・staff-info", "Private staff information."],
-        ["📊・support-stats", "Support statistics."]
-    ]
-};
-
-/*
-==================================================
-NORMAL ROLES
-==================================================
-*/
-
-const ROLES = [
-    ["👑 Resolve Owner", 0xF1C40F],
-    ["🛡️ Resolve Admin", 0xE74C3C],
-    ["🔧 Support Manager", 0xE67E22],
-    ["🎧 Senior Support", 0x3498DB],
-    ["💬 Support Team", 0x2ECC71],
-    ["🧪 Support Trial", 0x95A5A6],
-    ["🐛 Bug Hunter", 0x9B59B6],
-    ["💡 Community Team", 0x1ABC9C],
-    ["🌟 Early Supporter", 0xF1C40F],
-    ["🤖 Bot", 0x5865F2],
-
-    ["🔴 Red", 0xE74C3C],
-    ["🟠 Orange", 0xE67E22],
-    ["🟡 Yellow", 0xF1C40F],
-    ["🟢 Green", 0x2ECC71],
-    ["🔵 Blue", 0x3498DB],
-    ["🟣 Purple", 0x9B59B6],
-    ["🩷 Pink", 0xE91E63],
-    ["🩵 Cyan", 0x1ABC9C],
-    ["⚪ White", 0xFFFFFF],
-    ["⚫ Black", 0x2C2F33],
-
-    ["📢 Announcements", 0x5865F2],
-    ["🚀 Updates", 0x3498DB],
-    ["🐛 Bug Updates", 0xE74C3C],
-    ["🎉 Events", 0xF1C40F],
-    ["💡 Suggestions", 0x2ECC71]
+ * These are the official Resolve Support Server channels
+ * that Resolve is allowed to learn from automatically.
+ */
+const AUTO_KNOWLEDGE_CHANNELS = [
+    "📜・rules",
+    "🤖・about-resolve",
+    "📢・announcements",
+    "🚀・updates",
+    "📝・changelog",
+    "🎫・support",
+    "❓・faq",
+    "🏆・achievements",
+    "🎉・events",
+    "💡・suggestions",
+    "🐛・bug-reports"
 ];
 
 /*
-==================================================
-ACHIEVEMENT ROLES
-==================================================
-*/
+ * Get all useful text from a Discord message.
+ */
+function getMessageKnowledge(message) {
+    const parts = [];
 
-const ACHIEVEMENT_ROLES = [
-    ["👋 Resolve Member", 0x5865F2],
-    ["🎫 First Ticket", 0x3498DB],
-    ["🐛 Bug Hunter", 0xE74C3C],
-    ["💡 Idea Maker", 0xF1C40F],
-    ["🧠 Knowledge Seeker", 0x9B59B6],
-    ["🤖 Resolve Explorer", 0x2ECC71],
-    ["💬 Community Member", 0x1ABC9C],
-    ["🏆 Support Veteran", 0xF39C12],
-    ["⭐ Support Legend", 0xE67E22],
-    ["💎 Achievement Master", 0x3498DB],
-    ["👑 Resolve OG", 0xF1C40F]
-];
+    if (message.content?.trim()) {
+        parts.push(message.content.trim());
+    }
 
-/*
-==================================================
-LEGACY CLEANUP
-==================================================
-*/
-
-const LEGACY_CATEGORIES = [
-    "📢 INFORMATION",
-    "🌐 COMMUNITY",
-    "🎫 TICKETS"
-];
-
-const LEGACY_CHANNELS = [
-    "welcome",
-    "announcements",
-    "rules",
-    "about-resolve",
-    "support",
-    "bug-reports",
-    "suggestions",
-    "faq",
-    "colors",
-    "reaction-roles",
-    "general",
-    "events",
-    "staff-chat",
-    "staff-logs",
-    "staff-info",
-    "support-stats"
-];
-
-/*
-==================================================
-COMMAND
-==================================================
-*/
-
-module.exports = {
-
-    data: new SlashCommandBuilder()
-        .setName("server-setup")
-        .setDescription(
-            "Set up the official Resolve Support Server"
-        )
-        .setDefaultMemberPermissions(
-            PermissionFlagsBits.Administrator
-        ),
-
-    async execute(interaction) {
-
-        if (
-            interaction.guildId !==
-            SUPPORT_SERVER_ID
-        ) {
-            return interaction.reply({
-                content:
-                    "❌ This command can only be used in the official Resolve Support Server.",
-                ephemeral: true
-            });
+    for (const embed of message.embeds) {
+        if (embed.title) {
+            parts.push(`Title: ${embed.title}`);
         }
 
-        if (
-            !interaction.member.permissions.has(
-                PermissionFlagsBits.Administrator
+        if (embed.description) {
+            parts.push(embed.description);
+        }
+
+        if (embed.fields?.length) {
+            for (const field of embed.fields) {
+                parts.push(`${field.name}: ${field.value}`);
+            }
+        }
+
+        if (embed.footer?.text) {
+            parts.push(`Footer: ${embed.footer.text}`);
+        }
+    }
+
+    return parts.join("\n");
+}
+
+/*
+ * Check whether this is one of the official knowledge channels.
+ */
+function isAutomaticKnowledgeChannel(message) {
+    if (!message.guild) return false;
+
+    if (message.guild.id !== SUPPORT_SERVER_ID) {
+        return false;
+    }
+
+    return AUTO_KNOWLEDGE_CHANNELS.includes(
+        message.channel.name
+    );
+}
+
+/*
+ * Save a new message into the knowledge database.
+ */
+async function saveAutomaticKnowledge(message) {
+    try {
+        if (!isAutomaticKnowledgeChannel(message)) {
+            return false;
+        }
+
+        if (message.author.bot) {
+            return false;
+        }
+
+        const content = getMessageKnowledge(message);
+
+        if (!content) {
+            return false;
+        }
+
+        /*
+         * Make sure the source_channel_id column exists.
+         */
+        await db.query(`
+            ALTER TABLE knowledge
+            ADD COLUMN IF NOT EXISTS source_channel_id TEXT
+        `);
+
+        /*
+         * Store each important message separately.
+         *
+         * This makes updates easier to manage than replacing
+         * the entire channel's knowledge every time.
+         */
+        await db.query(
+            `
+            INSERT INTO knowledge (
+                guild_id,
+                title,
+                content,
+                created_by,
+                approved,
+                source_channel_id
             )
-        ) {
-            return interaction.reply({
-                content:
-                    "❌ You need Administrator to use this command.",
-                ephemeral: true
-            });
-        }
+            VALUES ($1, $2, $3, $4, TRUE, $5)
+            `,
+            [
+                message.guild.id,
+                `Automatic Knowledge • ${message.channel.name}`,
+                content,
+                message.author.id,
+                message.channel.id
+            ]
+        );
 
-        await interaction.deferReply({
-            ephemeral: true
-        });
+        console.log(
+            `🧠 Knowledge learned from #${message.channel.name}: ${message.id}`
+        );
 
-        const guild = interaction.guild;
-
+        /*
+         * Tell staff that Resolve successfully learned it.
+         */
         try {
-
-            console.log(
-                "================================="
-            );
-
-            console.log(
-                "⚙️ Starting Resolve Support Server setup..."
-            );
-
-            /*
-            ==========================================
-            CREATE NORMAL ROLES
-            ==========================================
-            */
-
-            const roles = {};
-
-            for (
-                const [name, color]
-                of ROLES
-            ) {
-
-                let role =
-                    guild.roles.cache.find(
-                        r => r.name === name
-                    );
-
-                if (!role) {
-
-                    role =
-                        await guild.roles.create({
-                            name,
-                            color,
-                            reason:
-                                "Resolve Support Server setup"
-                        });
-
-                    console.log(
-                        `➕ Created role: ${name}`
-                    );
-                }
-
-                roles[name] = role;
-            }
-
-            /*
-            ==========================================
-            CREATE ACHIEVEMENT ROLES
-            ==========================================
-            */
-
-            const achievementRoles = {};
-
-            for (
-                const [name, color]
-                of ACHIEVEMENT_ROLES
-            ) {
-
-                let role =
-                    guild.roles.cache.find(
-                        r => r.name === name
-                    );
-
-                if (!role) {
-
-                    role =
-                        await guild.roles.create({
-                            name,
-                            color,
-                            reason:
-                                "Resolve achievement role setup"
-                        });
-
-                    console.log(
-                        `🏆 Created achievement role: ${name}`
-                    );
-                }
-
-                achievementRoles[name] =
-                    role;
-            }
-
-            /*
-            ==========================================
-            OWNER ROLE
-            ==========================================
-            */
-
-            const ownerRole =
-                roles["👑 Resolve Owner"];
-
-            if (
-                ownerRole &&
-                !interaction.member.roles.cache.has(
-                    ownerRole.id
+            const confirmationEmbed = new EmbedBuilder()
+                .setTitle("🧠 Knowledge Updated")
+                .setDescription(
+                    "Resolve automatically added this information to its support knowledge."
                 )
-            ) {
-
-                await interaction.member.roles.add(
-                    ownerRole,
-                    "Resolve Support Server setup"
-                );
-            }
-
-            /*
-            ==========================================
-            CLEAN OLD CATEGORIES
-            ==========================================
-            */
-
-            for (
-                const categoryName
-                of LEGACY_CATEGORIES
-            ) {
-
-                const category =
-                    guild.channels.cache.find(
-                        channel =>
-                            channel.type ===
-                                ChannelType.GuildCategory &&
-                            channel.name ===
-                                categoryName
-                    );
-
-                if (!category) continue;
-
-                if (
-                    category.id ===
-                    interaction.channel?.parentId
-                ) {
-
-                    console.log(
-                        `🛡️ Keeping active category: ${category.name}`
-                    );
-
-                    continue;
-                }
-
-                const children =
-                    guild.channels.cache.filter(
-                        channel =>
-                            channel.parentId ===
-                            category.id
-                    );
-
-                for (
-                    const child
-                    of children.values()
-                ) {
-
-                    if (
-                        child.id ===
-                        interaction.channelId
-                    ) {
-
-                        console.log(
-                            `🛡️ Keeping setup channel: ${child.name}`
-                        );
-
-                        continue;
-                    }
-
-                    try {
-
-                        await child.delete(
-                            "Remove old Resolve layout"
-                        );
-
-                        console.log(
-                            `🗑️ Deleted old channel: ${child.name}`
-                        );
-
-                    } catch (error) {
-
-                        console.error(
-                            `⚠️ Could not delete ${child.name}:`,
-                            error.message
-                        );
-                    }
-                }
-
-                try {
-
-                    await category.delete(
-                        "Remove old Resolve layout"
-                    );
-
-                } catch (error) {
-
-                    console.error(
-                        `⚠️ Could not delete category ${category.name}:`,
-                        error.message
-                    );
-                }
-            }
-
-            /*
-            ==========================================
-            DELETE OLD CHANNEL NAMES
-            ==========================================
-            */
-
-            for (
-                const oldName
-                of LEGACY_CHANNELS
-            ) {
-
-                const oldChannels =
-                    guild.channels.cache.filter(
-                        channel =>
-                            channel.type ===
-                                ChannelType.GuildText &&
-                            channel.name ===
-                                oldName
-                    );
-
-                for (
-                    const channel
-                    of oldChannels.values()
-                ) {
-
-                    if (
-                        channel.id ===
-                        interaction.channelId
-                    ) {
-
-                        console.log(
-                            `🛡️ Keeping active setup channel: ${channel.name}`
-                        );
-
-                        continue;
-                    }
-
-                    try {
-
-                        await channel.delete(
-                            "Remove old Resolve layout"
-                        );
-
-                        console.log(
-                            `🗑️ Deleted old channel: ${channel.name}`
-                        );
-
-                    } catch (error) {
-
-                        console.error(
-                            `⚠️ Could not delete ${channel.name}:`,
-                            error.message
-                        );
-                    }
-                }
-            }
-
-            /*
-            ==========================================
-            CREATE CATEGORIES
-            ==========================================
-            */
-
-            const categories = {};
-
-            for (
-                const [key, name]
-                of Object.entries(CATEGORIES)
-            ) {
-
-                let category =
-                    guild.channels.cache.find(
-                        channel =>
-                            channel.type ===
-                                ChannelType.GuildCategory &&
-                            channel.name === name
-                    );
-
-                if (!category) {
-
-                    category =
-                        await guild.channels.create({
-                            name,
-                            type:
-                                ChannelType.GuildCategory,
-                            reason:
-                                "Resolve Support Server organization"
-                        });
-
-                    console.log(
-                        `📁 Created category: ${name}`
-                    );
-                }
-
-                categories[key] =
-                    category;
-            }
-
-            /*
-            ==========================================
-            STAFF PERMISSIONS
-            ==========================================
-            */
-
-            await setStaffPermissions(
-                categories.STAFF,
-                guild,
-                roles
-            );
-
-            /*
-            ==========================================
-            CREATE CHANNELS
-            ==========================================
-            */
-
-            const channels = {};
-
-            async function createChannel(
-                categoryKey,
-                name,
-                topic,
-                privateChannel = false
-            ) {
-
-                const category =
-                    categories[categoryKey];
-
-                let channel =
-                    guild.channels.cache.find(
-                        c =>
-                            c.type ===
-                                ChannelType.GuildText &&
-                            c.name === name
-                    );
-
-                if (!channel) {
-
-                    channel =
-                        await guild.channels.create({
-                            name,
-                            type:
-                                ChannelType.GuildText,
-                            parent:
-                                category.id,
-                            topic,
-                            reason:
-                                "Resolve Support Server organization"
-                        });
-
-                    console.log(
-                        `📝 Created ${name}`
-                    );
-
-                } else {
-
-                    if (
-                        channel.parentId !==
-                        category.id
-                    ) {
-
-                        await channel.setParent(
-                            category.id,
-                            {
-                                lockPermissions: false,
-                                reason:
-                                    "Resolve channel organization"
-                            }
-                        );
-                    }
-
-                    await channel
-                        .setTopic(topic)
-                        .catch(() => {});
-                }
-
-                if (privateChannel) {
-
-                    await channel.permissionOverwrites.set([
-                        {
-                            id:
-                                guild.roles.everyone.id,
-                            deny: [
-                                PermissionFlagsBits.ViewChannel
-                            ]
-                        },
-                        ...Object.values(
-                            roles
-                        )
-                            .filter(role =>
-                                [
-                                    "👑 Resolve Owner",
-                                    "🛡️ Resolve Admin",
-                                    "🔧 Support Manager",
-                                    "🎧 Senior Support",
-                                    "💬 Support Team"
-                                ].includes(
-                                    role.name
-                                )
-                            )
-                            .map(role => ({
-                                id: role.id,
-                                allow: [
-                                    PermissionFlagsBits.ViewChannel
-                                ]
-                            }))
-                    ]);
-                }
-
-                channels[name] =
-                    channel;
-
-                return channel;
-            }
-
-            /*
-            ==========================================
-            MAKE CHANNELS
-            ==========================================
-            */
-
-            for (
-                const [name, topic]
-                of CHANNELS.START
-            ) {
-                await createChannel(
-                    "START",
-                    name,
-                    topic
-                );
-            }
-
-            for (
-                const [name, topic]
-                of CHANNELS.RESOLVE
-            ) {
-                await createChannel(
-                    "RESOLVE",
-                    name,
-                    topic
-                );
-            }
-
-            for (
-                const [name, topic]
-                of CHANNELS.SUPPORT
-            ) {
-                await createChannel(
-                    "SUPPORT",
-                    name,
-                    topic
-                );
-            }
-
-            for (
-                const [name, topic]
-                of CHANNELS.ACHIEVEMENTS
-            ) {
-                await createChannel(
-                    "ACHIEVEMENTS",
-                    name,
-                    topic
-                );
-            }
-
-            for (
-                const [name, topic]
-                of CHANNELS.COMMUNITY
-            ) {
-                await createChannel(
-                    "COMMUNITY",
-                    name,
-                    topic
-                );
-            }
-
-            for (
-                const [name, topic]
-                of CHANNELS.STAFF
-            ) {
-                await createChannel(
-                    "STAFF",
-                    name,
-                    topic,
-                    true
-                );
-            }
-
-            /*
-            ==========================================
-            WELCOME
-            ==========================================
-            */
-
-            await sendOrUpdate(
-                channels["👋・welcome"],
-                "👋 Welcome to Resolve",
-                new EmbedBuilder()
-                    .setTitle("👋 Welcome to Resolve")
-                    .setDescription(
-                        "**Welcome to the official Resolve Support Server.**\n\n" +
-                        "Resolve is an **AI-powered support bot for Discord**, designed to help communities provide faster, smarter, and more reliable support.\n\n" +
-                        "Whether you're here to get help, report a problem, share an idea, or meet the community — you've found the right place."
-                    )
-                    .addFields(
-                        {
-                            name: "🤖 What is Resolve?",
-                            value:
-                                "An AI-powered support system built specifically for Discord communities."
-                        },
-                        {
-                            name: "🎫 Need Help?",
-                            value:
-                                "Head to **🎫・support** and open a ticket."
-                        },
-                        {
-                            name: "🐛 Found a Bug?",
-                            value:
-                                "Report it in **🐛・bug-reports**."
-                        },
-                        {
-                            name: "💡 Have an Idea?",
-                            value:
-                                "Share it in **💡・suggestions**."
-                        },
-                        {
-                            name: "🏆 Want Achievements?",
-                            value:
-                                "Participate in the community and unlock achievements. Every achievement can earn you a special role."
-                        },
-                        {
-                            name: "🎭 Customize Your Roles",
-                            value:
-                                "Choose notification roles in **🎭・reaction-roles** and colors in **🎨・colors**."
-                        }
-                    )
-                    .setFooter({
-                        text:
-                            "Resolve • AI-powered support for Discord"
-                    })
-                    .setTimestamp()
-            );
-
-            /*
-            ==========================================
-            RULES
-            ==========================================
-            */
-
-            await sendOrUpdate(
-                channels["📜・rules"],
-                "📜 Resolve Community Rules",
-                new EmbedBuilder()
-                    .setTitle(
-                        "📜 Resolve Community Rules"
-                    )
-                    .setDescription(
-                        "A great community starts with everyone doing their part."
-                    )
-                    .addFields(
-                        {
-                            name: "01 • 🤝 Respect",
-                            value:
-                                "Treat everyone with respect. Harassment and targeted abuse are not welcome."
-                        },
-                        {
-                            name: "02 • 💬 Keep It Appropriate",
-                            value:
-                                "Keep conversations appropriate and follow Discord's rules."
-                        },
-                        {
-                            name: "03 • 🚫 No Spam",
-                            value:
-                                "Don't spam messages, mentions, reactions, or commands."
-                        },
-                        {
-                            name: "04 • 📢 No Unapproved Advertising",
-                            value:
-                                "Don't advertise unrelated communities or services without permission."
-                        },
-                        {
-                            name: "05 • 🎫 Use Support Properly",
-                            value:
-                                "Use the appropriate channels and provide useful information when requesting support."
-                        },
-                        {
-                            name: "06 • 🛡️ Respect Staff",
-                            value:
-                                "Follow reasonable directions from the Resolve Support Team."
-                        },
-                        {
-                            name: "07 • 📜 Discord Guidelines",
-                            value:
-                                "You must follow Discord's Terms of Service and Community Guidelines."
-                        }
-                    )
-                    .setFooter({
-                        text:
-                            "Resolve • Community Guidelines"
-                    })
-                    .setTimestamp()
-            );
-
-            /*
-            ==========================================
-            ABOUT
-            ==========================================
-            */
-
-            await sendOrUpdate(
-                channels["🤖・about-resolve"],
-                "🤖 Meet Resolve",
-                new EmbedBuilder()
-                    .setTitle("🤖 Meet Resolve")
-                    .setDescription(
-                        "**AI-powered support for Discord.**\n\n" +
-                        "Resolve combines AI assistance with human support to help Discord communities handle questions and support requests."
-                    )
-                    .addFields(
-                        {
-                            name: "🧠 AI Support",
-                            value:
-                                "Answer questions using verified server knowledge."
-                        },
-                        {
-                            name: "🔐 Verified Knowledge",
-                            value:
-                                "Staff control the information Resolve can use."
-                        },
-                        {
-                            name: "🎫 Smart Tickets",
-                            value:
-                                "Organized support tickets with priority levels."
-                        },
-                        {
-                            name: "👤 Human Handoff",
-                            value:
-                                "When AI can't confidently help, human support takes over."
-                        },
-                        {
-                            name: "🏆 Achievements",
-                            value:
-                                "Earn special achievements and unlock exclusive roles."
-                        },
-                        {
-                            name: "🌐 Built for Discord",
-                            value:
-                                "Designed around real Discord communities."
-                        }
-                    )
-                    .setFooter({
-                        text:
-                            "Resolve • Built for Discord"
-                    })
-                    .setTimestamp()
-            );
-
-            /*
-            ==========================================
-            SUPPORT
-            ==========================================
-            */
-
-            await sendOrUpdate(
-                channels["🎫・support"],
-                "🎫 Resolve Support Center",
-                new EmbedBuilder()
-                    .setTitle(
-                        "🎫 Resolve Support Center"
-                    )
-                    .setDescription(
-                        "**Need help? Open a support ticket below.**\n\n" +
-                        "Choose the priority that best matches your issue. Please don't select Urgent unless your issue genuinely requires immediate attention."
-                    )
-                    .addFields(
-                        {
-                            name: "🟢 Low",
-                            value:
-                                "General questions, feedback, or non-urgent requests.",
-                            inline: true
-                        },
-                        {
-                            name: "🔵 Normal",
-                            value:
-                                "Regular support issues.",
-                            inline: true
-                        },
-                        {
-                            name: "🟠 High",
-                            value:
-                                "Important issues that should be reviewed sooner.",
-                            inline: true
-                        },
-                        {
-                            name: "🔴 Urgent",
-                            value:
-                                "Critical issues requiring immediate attention.",
-                            inline: true
-                        }
-                    )
-                    .setFooter({
-                        text:
-                            "Resolve Support • Choose your priority"
-                    })
-                    .setTimestamp(),
-                [
-                    new ActionRowBuilder()
-                        .addComponents(
-                            new ButtonBuilder()
-                                .setCustomId(
-                                    "ticket_priority_low"
-                                )
-                                .setLabel("Low")
-                                .setEmoji("🟢")
-                                .setStyle(
-                                    ButtonStyle.Success
-                                ),
-
-                            new ButtonBuilder()
-                                .setCustomId(
-                                    "ticket_priority_normal"
-                                )
-                                .setLabel("Normal")
-                                .setEmoji("🔵")
-                                .setStyle(
-                                    ButtonStyle.Primary
-                                ),
-
-                            new ButtonBuilder()
-                                .setCustomId(
-                                    "ticket_priority_high"
-                                )
-                                .setLabel("High")
-                                .setEmoji("🟠")
-                                .setStyle(
-                                    ButtonStyle.Secondary
-                                ),
-
-                            new ButtonBuilder()
-                                .setCustomId(
-                                    "ticket_priority_urgent"
-                                )
-                                .setLabel("Urgent")
-                                .setEmoji("🔴")
-                                .setStyle(
-                                    ButtonStyle.Danger
-                                )
-                        )
-                ]
-            );
-
-            /*
-            ==========================================
-            ACHIEVEMENTS
-            ==========================================
-            */
-
-            await sendOrUpdate(
-                channels["🏆・achievements"],
-                "🏆 Resolve Achievements",
-                new EmbedBuilder()
-                    .setTitle(
-                        "🏆 Resolve Achievement Hall"
-                    )
-                    .setDescription(
-                        "**Earn achievements. Unlock roles. Become part of Resolve.**\n\n" +
-                        "Achievements are automatically awarded when you complete their requirements.\n\n" +
-                        "When you unlock one, Resolve will **DM you** and announce your achievement in **📜・achievement-log**."
-                    )
-                    .addFields(
-                        {
-                            name: "🌟 Getting Started",
-                            value:
-                                "👋 Resolve Member\n" +
-                                "🤖 Resolve Explorer\n" +
-                                "🎨 Colorful",
-                            inline: true
-                        },
-                        {
-                            name: "🎫 Support",
-                            value:
-                                "🎫 First Ticket\n" +
-                                "🏆 Support Veteran\n" +
-                                "⭐ Support Legend",
-                            inline: true
-                        },
-                        {
-                            name: "🐛 Bug Hunting",
-                            value:
-                                "🐛 Bug Hunter",
-                            inline: true
-                        },
-                        {
-                            name: "💡 Ideas",
-                            value:
-                                "💡 Idea Maker",
-                            inline: true
-                        },
-                        {
-                            name: "🧠 Knowledge",
-                            value:
-                                "🧠 Knowledge Seeker",
-                            inline: true
-                        },
-                        {
-                            name: "💬 Community",
-                            value:
-                                "💬 Community Member",
-                            inline: true
-                        },
-                        {
-                            name: "💎 Rare",
-                            value:
-                                "💎 Achievement Master\n" +
-                                "👑 Resolve OG",
-                            inline: true
-                        }
-                    )
-                    .setFooter({
-                        text:
-                            "Resolve • How many can you unlock?"
-                    })
-                    .setTimestamp()
-            );
-
-            /*
-            ==========================================
-            FAQ
-            ==========================================
-            */
-
-            await sendOrUpdate(
-                channels["❓・faq"],
-                "❓ Frequently Asked Questions",
-                new EmbedBuilder()
-                    .setTitle(
-                        "❓ Frequently Asked Questions"
-                    )
-                    .setDescription(
-                        "Quick answers to common questions."
-                    )
-                    .addFields(
-                        {
-                            name: "🤖 What is Resolve?",
-                            value:
-                                "Resolve is an AI-powered support bot for Discord."
-                        },
-                        {
-                            name: "🎫 How do I get support?",
-                            value:
-                                "Open a ticket in **🎫・support**."
-                        },
-                        {
-                            name: "🐛 Where do I report bugs?",
-                            value:
-                                "Use **🐛・bug-reports**."
-                        },
-                        {
-                            name: "💡 Where do I suggest features?",
-                            value:
-                                "Use **💡・suggestions**."
-                        },
-                        {
-                            name: "🏆 How do achievements work?",
-                            value:
-                                "Complete their requirements and Resolve automatically awards the achievement and its role."
-                        }
-                    )
-                    .setFooter({
-                        text:
-                            "Resolve • FAQ"
-                    })
-                    .setTimestamp()
-            );
-
-            /*
-            ==========================================
-            REACTION ROLES
-            ==========================================
-            */
-
-            await sendOrUpdate(
-                channels["🎭・reaction-roles"],
-                "🎭 Notification Roles",
-                new EmbedBuilder()
-                    .setTitle(
-                        "🎭 Choose Your Notification Roles"
-                    )
-                    .setDescription(
-                        "React to receive the notifications you care about.\n\n" +
-                        "Remove your reaction whenever you want to remove the role."
-                    )
-                    .addFields(
-                        {
-                            name: "📢 Announcements",
-                            value:
-                                "Major Resolve announcements.",
-                            inline: true
-                        },
-                        {
-                            name: "🚀 Updates",
-                            value:
-                                "Product updates.",
-                            inline: true
-                        },
-                        {
-                            name: "🐛 Bug Updates",
-                            value:
-                                "Bug-related announcements.",
-                            inline: true
-                        },
-                        {
-                            name: "🎉 Events",
-                            value:
-                                "Community events.",
-                            inline: true
-                        },
-                        {
-                            name: "💡 Suggestions",
-                            value:
-                                "Suggestion updates.",
-                            inline: true
-                        }
-                    )
-                    .setFooter({
-                        text:
-                            "Resolve • Notification Roles"
-                    })
-                    .setTimestamp()
-            );
-
-            /*
-            ==========================================
-            COLORS
-            ==========================================
-            */
-
-            await sendOrUpdate(
-                channels["🎨・colors"],
-                "🎨 Choose Your Color",
-                new EmbedBuilder()
-                    .setTitle(
-                        "🎨 Choose Your Color"
-                    )
-                    .setDescription(
-                        "React below to choose your name color.\n\n" +
-                        "**You can only have one color role at a time.**"
-                    )
-                    .addFields(
-                        {
-                            name: "🔴 Red",
-                            value: "🔴",
-                            inline: true
-                        },
-                        {
-                            name: "🟠 Orange",
-                            value: "🟠",
-                            inline: true
-                        },
-                        {
-                            name: "🟡 Yellow",
-                            value: "🟡",
-                            inline: true
-                        },
-                        {
-                            name: "🟢 Green",
-                            value: "🟢",
-                            inline: true
-                        },
-                        {
-                            name: "🔵 Blue",
-                            value: "🔵",
-                            inline: true
-                        },
-                        {
-                            name: "🟣 Purple",
-                            value: "🟣",
-                            inline: true
-                        },
-                        {
-                            name: "🩷 Pink",
-                            value: "🩷",
-                            inline: true
-                        },
-                        {
-                            name: "🩵 Cyan",
-                            value: "🩵",
-                            inline: true
-                        },
-                        {
-                            name: "⚪ White",
-                            value: "⚪",
-                            inline: true
-                        },
-                        {
-                            name: "⚫ Black",
-                            value: "⚫",
-                            inline: true
-                        }
-                    )
-                    .setFooter({
-                        text:
-                            "Resolve • Color Roles"
-                    })
-                    .setTimestamp()
-            );
-
-            /*
-            ==========================================
-            ADD REACTIONS
-            ==========================================
-            */
-
-            await addReactionPanelReactions(
-                channels["🎭・reaction-roles"],
-                [
-                    "📢",
-                    "🚀",
-                    "🐛",
-                    "🎉",
-                    "💡"
-                ]
-            );
-
-            await addReactionPanelReactions(
-                channels["🎨・colors"],
-                [
-                    "🔴",
-                    "🟠",
-                    "🟡",
-                    "🟢",
-                    "🔵",
-                    "🟣",
-                    "🩷",
-                    "🩵",
-                    "⚪",
-                    "⚫"
-                ]
-            );
-
-            /*
-            ==========================================
-            DATABASE
-            ==========================================
-            */
-
-            await db.query(
-                `
-                INSERT INTO guilds (
-                    guild_id,
-                    guild_name
-                )
-                VALUES ($1, $2)
-                ON CONFLICT (guild_id)
-                DO UPDATE SET
-                    guild_name = EXCLUDED.guild_name
-                `,
-                [
-                    guild.id,
-                    guild.name
-                ]
-            );
-
-            await db.query(
-                `
-                INSERT INTO guild_settings (
-                    guild_id,
-                    support_role_id,
-                    ticket_category_id,
-                    ai_enabled
-                )
-                VALUES ($1, $2, $3, TRUE)
-                ON CONFLICT (guild_id)
-                DO UPDATE SET
-                    support_role_id =
-                        EXCLUDED.support_role_id,
-                    ticket_category_id =
-                        EXCLUDED.ticket_category_id,
-                    ai_enabled = TRUE,
-                    updated_at = NOW()
-                `,
-                [
-                    guild.id,
-                    roles["💬 Support Team"].id,
-                    categories.SUPPORT.id
-                ]
-            );
-
-            /*
-            ==========================================
-            FINAL
-            ==========================================
-            */
-
-            const finalEmbed =
-                new EmbedBuilder()
-                    .setTitle(
-                        "✨ Resolve Support Server Ready"
-                    )
-                    .setDescription(
-                        "**Setup has been completed successfully.**\n\n" +
-                        "The official Resolve Support Server has been organized and branded."
-                    )
-                    .addFields(
-                        {
-                            name: "📌 Start Here",
-                            value:
-                                "Welcome, rules, roles & colors",
-                            inline: true
-                        },
-                        {
-                            name: "📢 Resolve",
-                            value:
-                                "Announcements, updates & changelog",
-                            inline: true
-                        },
-                        {
-                            name: "🆘 Support",
-                            value:
-                                "Tickets, FAQ, bugs & suggestions",
-                            inline: true
-                        },
-                        {
-                            name: "🏆 Achievements",
-                            value:
-                                "Achievement Hall & unlock logs",
-                            inline: true
-                        },
-                        {
-                            name: "💬 Community",
-                            value:
-                                "Chat, events & showcase",
-                            inline: true
-                        },
-                        {
-                            name: "🔒 Staff",
-                            value:
-                                "Private staff area",
-                            inline: true
-                        }
-                    )
-                    .setFooter({
-                        text:
-                            "Resolve • AI-powered support for Discord"
-                    })
-                    .setTimestamp();
-
-            try {
-
-                await interaction.editReply({
-                    embeds: [finalEmbed]
-                });
-
-            } catch (error) {
-
-                console.error(
-                    "⚠️ Could not edit setup response:",
-                    error.message
-                );
-            }
-
-            console.log(
-                "✅ Resolve Support Server setup completed!"
-            );
-
-            console.log(
-                "================================="
-            );
-
+                .addFields({
+                    name: "📚 Source",
+                    value: `<#${message.channel.id}>`,
+                    inline: true
+                })
+                .setFooter({
+                    text: "Resolve • Automatic Knowledge"
+                })
+                .setTimestamp();
+
+            await message.channel.send({
+                embeds: [confirmationEmbed]
+            });
         } catch (error) {
-
             console.error(
-                "❌ Server setup error:",
+                "⚠️ Could not send knowledge confirmation:",
                 error
             );
+        }
 
-            try {
+        return true;
 
-                await interaction.editReply({
-                    content:
-                        "❌ Server setup failed. Check the bot console for the error."
-                });
+    } catch (error) {
+        console.error(
+            "❌ Automatic knowledge error:",
+            error
+        );
 
-            } catch (replyError) {
+        return false;
+    }
+}
 
-                console.error(
-                    "⚠️ Could not send setup error:",
-                    replyError.message
+/*
+ * Retrieve approved knowledge for the current server.
+ */
+async function getServerKnowledge(guildId) {
+    try {
+        const result = await db.query(
+            `
+            SELECT
+                title,
+                content,
+                source_channel_id
+            FROM knowledge
+            WHERE guild_id = $1
+            AND approved = TRUE
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT 100
+            `,
+            [guildId]
+        );
+
+        return result.rows;
+
+    } catch (error) {
+        /*
+         * Some older databases may not have updated_at.
+         * Fall back to created_at.
+         */
+        try {
+            const result = await db.query(
+                `
+                SELECT
+                    title,
+                    content,
+                    source_channel_id
+                FROM knowledge
+                WHERE guild_id = $1
+                AND approved = TRUE
+                ORDER BY created_at DESC
+                LIMIT 100
+                `,
+                [guildId]
+            );
+
+            return result.rows;
+
+        } catch (fallbackError) {
+            console.error(
+                "❌ Failed to retrieve server knowledge:",
+                fallbackError
+            );
+
+            return [];
+        }
+    }
+}
+
+/*
+ * Build the knowledge section for Gemini.
+ */
+function buildKnowledgeContext(knowledge) {
+    if (!knowledge.length) {
+        return `
+No approved server knowledge is currently available.
+
+Do not invent server-specific information.
+`;
+    }
+
+    /*
+     * Prevent an extremely large database from creating
+     * an unnecessarily huge AI prompt.
+     */
+    const MAX_KNOWLEDGE_LENGTH = 30000;
+
+    let context = "";
+    
+    for (const item of knowledge) {
+        const section =
+            `\n--- ${item.title} ---\n` +
+            `${item.content}\n`;
+
+        if (
+            context.length + section.length >
+            MAX_KNOWLEDGE_LENGTH
+        ) {
+            break;
+        }
+
+        context += section;
+    }
+
+    return `
+APPROVED SERVER KNOWLEDGE:
+
+${context}
+
+END APPROVED SERVER KNOWLEDGE.
+`;
+}
+
+module.exports = {
+    name: "messageCreate",
+
+    async execute(message) {
+        try {
+            if (message.author.bot) return;
+
+            /*
+             * ==========================================
+             * AUTOMATIC KNOWLEDGE WATCHER
+             * ==========================================
+             */
+
+            if (isAutomaticKnowledgeChannel(message)) {
+                await saveAutomaticKnowledge(message);
+            }
+
+            /*
+             * ==========================================
+             * ACHIEVEMENTS
+             * ==========================================
+             */
+
+            if (
+                message.guild &&
+                message.guild.id === SUPPORT_SERVER_ID &&
+                !message.channel.name?.startsWith("ticket-")
+            ) {
+                await checkMessageAchievements(
+                    message.guild,
+                    message.author.id
                 );
             }
+
+            /*
+             * ==========================================
+             * TICKET SYSTEM
+             * ==========================================
+             */
+
+            if (!message.channel.name?.startsWith("ticket-")) {
+                return;
+            }
+
+            const ticketResult = await db.query(
+                `
+                SELECT *
+                FROM tickets
+                WHERE channel_id = $1
+                LIMIT 1
+                `,
+                [message.channel.id]
+            );
+
+            if (ticketResult.rows.length === 0) {
+                return;
+            }
+
+            const ticket = ticketResult.rows[0];
+
+            if (ticket.status === "closed") {
+                return;
+            }
+
+            /*
+             * Once a human takes over, AI stops responding.
+             */
+            if (ticket.status === "human") {
+                return;
+            }
+
+            const settingsResult = await db.query(
+                `
+                SELECT
+                    support_role_id,
+                    ai_enabled
+                FROM guild_settings
+                WHERE guild_id = $1
+                LIMIT 1
+                `,
+                [message.guild.id]
+            );
+
+            if (settingsResult.rows.length === 0) {
+                return;
+            }
+
+            const settings = settingsResult.rows[0];
+
+            if (!settings.ai_enabled) {
+                return;
+            }
+
+            /*
+             * ==========================================
+             * TICKET ACHIEVEMENTS
+             * ==========================================
+             */
+
+            await awardAchievement({
+                guild: message.guild,
+                userId: message.author.id,
+                key: "resolve_explorer",
+                name: "Resolve Explorer",
+                description:
+                    "You used Resolve for the first time.",
+                emoji: "🤖"
+            });
+
+            await awardAchievement({
+                guild: message.guild,
+                userId: message.author.id,
+                key: "knowledge_seeker",
+                name: "Knowledge Seeker",
+                description:
+                    "You asked Resolve for help.",
+                emoji: "🧠"
+            });
+
+            /*
+             * ==========================================
+             * LOAD SERVER KNOWLEDGE
+             * ==========================================
+             */
+
+            const knowledge =
+                await getServerKnowledge(
+                    message.guild.id
+                );
+
+            const knowledgeContext =
+                buildKnowledgeContext(
+                    knowledge
+                );
+
+            await message.channel.sendTyping();
+
+            /*
+             * ==========================================
+             * GEMINI PROMPT
+             * ==========================================
+             */
+
+            const prompt = `
+You are Resolve, an AI-powered support assistant for a Discord server.
+
+You are currently helping a user inside a support ticket.
+
+User: ${message.author.username}
+
+User message:
+${message.content}
+
+${knowledgeContext}
+
+IMPORTANT RULES:
+
+- Be helpful, clear, friendly, and professional.
+- Keep responses reasonably short.
+- Use the APPROVED SERVER KNOWLEDGE whenever it contains information relevant to the user's question.
+- Treat the approved server knowledge as the authoritative source for server-specific information.
+- Never invent server rules, policies, commands, prices, procedures, events, dates, features, or other information.
+- Never guess.
+- If the approved knowledge does not contain enough information to confidently answer the question, do NOT make up an answer.
+- If you cannot confidently answer using the approved knowledge, request human support.
+- General knowledge is okay when it does not conflict with server-specific information.
+- If server-specific information is required and it is not present in the approved knowledge, request human support.
+
+If human support is required, your response MUST begin with exactly:
+
+HANDOFF_NEEDED
+
+When requesting human support, briefly explain why you cannot confidently answer.
+`;
+
+            const answer = await askGemini(prompt);
+
+            if (!answer) {
+                return;
+            }
+
+            const trimmedAnswer =
+                answer.trim();
+
+            /*
+             * ==========================================
+             * HUMAN HANDOFF
+             * ==========================================
+             */
+
+            if (
+                trimmedAnswer.startsWith(
+                    "HANDOFF_NEEDED"
+                )
+            ) {
+                await db.query(
+                    `
+                    UPDATE tickets
+                    SET status = 'human'
+                    WHERE channel_id = $1
+                    AND status = 'open'
+                    `,
+                    [message.channel.id]
+                );
+
+                const cleanAnswer =
+                    trimmedAnswer
+                        .replace(
+                            /^HANDOFF_NEEDED\s*/i,
+                            ""
+                        )
+                        .trim();
+
+                const handoffEmbed =
+                    new EmbedBuilder()
+                        .setTitle(
+                            "👤 Human Support Needed"
+                        )
+                        .setDescription(
+                            cleanAnswer ||
+                            "I don't have enough information to confidently answer this. A member of the Support Team will help you."
+                        )
+                        .setFooter({
+                            text:
+                                "Resolve • AI Support"
+                        })
+                        .setTimestamp();
+
+                await message.reply({
+                    embeds: [
+                        handoffEmbed
+                    ]
+                });
+
+                if (
+                    settings.support_role_id
+                ) {
+                    await message.channel.send({
+                        content:
+                            `<@&${settings.support_role_id}> 🔔 **Human support is needed in this ticket.**`
+                    });
+                } else {
+                    await message.channel.send({
+                        content:
+                            "🔔 **Human support is needed in this ticket.**"
+                    });
+                }
+
+                console.log(
+                    `👤 AI handed ticket ${message.channel.id} to human support.`
+                );
+
+                return;
+            }
+
+            /*
+             * ==========================================
+             * NORMAL AI RESPONSE
+             * ==========================================
+             */
+
+            await message.reply({
+                content:
+                    `🤖 ${trimmedAnswer}`
+            });
+
+        } catch (error) {
+            console.error(
+                "❌ AI support error:",
+                error
+            );
         }
     }
 };
-
-/*
-==================================================
-STAFF PERMISSIONS
-==================================================
-*/
-
-async function setStaffPermissions(
-    category,
-    guild,
-    roles
-) {
-
-    await category.permissionOverwrites.set([
-        {
-            id:
-                guild.roles.everyone.id,
-            deny: [
-                PermissionFlagsBits.ViewChannel
-            ]
-        },
-        ...[
-            "👑 Resolve Owner",
-            "🛡️ Resolve Admin",
-            "🔧 Support Manager",
-            "🎧 Senior Support",
-            "💬 Support Team"
-        ]
-            .map(name => roles[name])
-            .filter(Boolean)
-            .map(role => ({
-                id: role.id,
-                allow: [
-                    PermissionFlagsBits.ViewChannel
-                ]
-            }))
-    ]);
-}
-
-/*
-==================================================
-SEND / UPDATE EMBED
-==================================================
-*/
-
-async function sendOrUpdate(
-    channel,
-    title,
-    embed,
-    components = []
-) {
-
-    if (!channel) return;
-
-    try {
-
-        const messages =
-            await channel.messages.fetch({
-                limit: 25
-            });
-
-        const existing =
-            messages.find(
-                message =>
-                    message.author.id ===
-                        channel.client.user.id &&
-                    message.embeds.length > 0 &&
-                    message.embeds[0].title ===
-                        title
-            );
-
-        if (existing) {
-
-            await existing.edit({
-                embeds: [embed],
-                components
-            });
-
-            return existing;
-        }
-
-        return await channel.send({
-            embeds: [embed],
-            components
-        });
-
-    } catch (error) {
-
-        console.error(
-            `⚠️ Could not update ${channel.name}:`,
-            error.message
-        );
-    }
-}
-
-/*
-==================================================
-REACTIONS
-==================================================
-*/
-
-async function addReactionPanelReactions(
-    channel,
-    emojis
-) {
-
-    if (!channel) return;
-
-    try {
-
-        const messages =
-            await channel.messages.fetch({
-                limit: 25
-            });
-
-        const panel =
-            messages.find(
-                message =>
-                    message.author.id ===
-                        channel.client.user.id &&
-                    message.embeds.length > 0
-            );
-
-        if (!panel) return;
-
-        for (
-            const emoji
-            of emojis
-        ) {
-
-            try {
-
-                if (
-                    !panel.reactions.cache.has(
-                        emoji
-                    )
-                ) {
-
-                    await panel.react(
-                        emoji
-                    );
-                }
-
-            } catch (error) {
-
-                console.error(
-                    `⚠️ Could not add reaction ${emoji}:`,
-                    error.message
-                );
-            }
-        }
-
-    } catch (error) {
-
-        console.error(
-            `⚠️ Could not load reactions for ${channel.name}:`,
-            error.message
-        );
-    }
-}

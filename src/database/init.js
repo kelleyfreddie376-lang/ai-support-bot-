@@ -32,6 +32,19 @@ async function initDatabase() {
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS knowledge_channels (
+            id BIGSERIAL PRIMARY KEY,
+            guild_id TEXT NOT NULL REFERENCES guilds(guild_id) ON DELETE CASCADE,
+            channel_id TEXT NOT NULL,
+            channel_name TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+            UNIQUE (
+                guild_id,
+                channel_id
+            )
+        );
+
         CREATE TABLE IF NOT EXISTS tickets (
             id BIGSERIAL PRIMARY KEY,
             guild_id TEXT NOT NULL REFERENCES guilds(guild_id) ON DELETE CASCADE,
@@ -87,6 +100,9 @@ async function initDatabase() {
 
         CREATE INDEX IF NOT EXISTS idx_knowledge_guild
             ON knowledge(guild_id);
+
+        CREATE INDEX IF NOT EXISTS idx_knowledge_channels_guild
+            ON knowledge_channels(guild_id);
 
         CREATE INDEX IF NOT EXISTS idx_tickets_guild
             ON tickets(guild_id);
