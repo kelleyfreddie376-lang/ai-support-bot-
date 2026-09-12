@@ -111,6 +111,7 @@ module.exports = {
                 const knowledge = result.rows[0];
 
                 const embed = new EmbedBuilder()
+                    .setColor(0x57F287)
                     .setTitle("✅ Knowledge Verified")
                     .setDescription(
                         "This information has been approved and can now be used by Resolve."
@@ -219,6 +220,7 @@ module.exports = {
                 const title = result.rows[0].title;
 
                 const embed = new EmbedBuilder()
+                    .setColor(0xED4245)
                     .setTitle("❌ Knowledge Rejected")
                     .setDescription(
                         "This information was rejected and has been removed from Resolve's knowledge system."
@@ -290,6 +292,13 @@ module.exports = {
                 normal: "🔵 Normal",
                 high: "🟠 High",
                 urgent: "🔴 Urgent"
+            };
+
+            const priorityColors = {
+                low: 0x57F287,
+                normal: 0x5865F2,
+                high: 0xFEE75C,
+                urgent: 0xED4245
             };
 
             if (!priorityNames[priority]) {
@@ -423,7 +432,7 @@ module.exports = {
                 // SAVE TICKET
                 // ==========================================
 
-                await db.query(
+                const ticketResult = await db.query(
                     `
                     INSERT INTO tickets (
                         guild_id,
@@ -433,6 +442,7 @@ module.exports = {
                         priority
                     )
                     VALUES ($1, $2, $3, 'open', $4)
+                    RETURNING id
                     `,
                     [
                         interaction.guild.id,
@@ -442,34 +452,58 @@ module.exports = {
                     ]
                 );
 
+                const ticketId = ticketResult.rows[0].id;
+
                 // ==========================================
-                // TICKET EMBED
+                // TICKET EMBED 2.0
                 // ==========================================
 
                 const embed = new EmbedBuilder()
-                    .setTitle("🎫 Support Ticket")
+                    .setColor(priorityColors[priority])
+                    .setTitle("🎫 Resolve Support Ticket")
                     .setDescription(
-                        `Welcome <@${interaction.user.id}>!\n\n` +
-                        "Resolve AI is now available to help with your issue.\n\n" +
-                        `**Priority:** ${priorityNames[priority]}\n\n` +
-                        "Please describe your issue below."
+                        `Welcome <@${interaction.user.id}>! 👋\n\n` +
+                        "Your private support ticket is ready.\n" +
+                        "Resolve AI will review your message using the server's verified knowledge.\n\n" +
+                        "If Resolve cannot confidently answer your question, a Support Team member can take over."
                     )
                     .addFields(
                         {
+                            name: "🆔 Ticket ID",
+                            value: `#${ticketId}`,
+                            inline: true
+                        },
+                        {
+                            name: "📊 Priority",
+                            value: priorityNames[priority],
+                            inline: true
+                        },
+                        {
+                            name: "📌 Status",
+                            value: "🤖 AI Support Active",
+                            inline: true
+                        },
+                        {
                             name: "🤖 Resolve AI",
                             value:
-                                "Resolve will try to help first. If human support is required, the ticket will remain open and the Support Team will be notified.",
+                                "I'll use verified server knowledge to help answer your question. I won't guess when the information isn't available.",
                             inline: false
                         },
                         {
                             name: "👤 Human Support",
                             value:
-                                "A Support Team member can claim the ticket at any time.",
+                                "Support Team members can claim this ticket whenever human assistance is needed.",
+                            inline: false
+                        },
+                        {
+                            name: "📝 What to do next",
+                            value:
+                                "Describe your issue clearly in your next message. Include relevant details so Resolve can help you faster.",
                             inline: false
                         }
                     )
                     .setFooter({
-                        text: "Resolve • AI Support"
+                        text: `Resolve • ${priorityNames[priority]} Priority`
                     })
                     .setTimestamp();
 
@@ -481,13 +515,13 @@ module.exports = {
                     new ActionRowBuilder().addComponents(
                         new ButtonBuilder()
                             .setCustomId("ticket_claim")
-                            .setLabel("Claim")
+                            .setLabel("Claim Ticket")
                             .setEmoji("👤")
                             .setStyle(ButtonStyle.Primary),
 
                         new ButtonBuilder()
                             .setCustomId("ticket_close")
-                            .setLabel("Close")
+                            .setLabel("Close Ticket")
                             .setEmoji("🔒")
                             .setStyle(ButtonStyle.Danger)
                     );
@@ -508,7 +542,9 @@ module.exports = {
 
                 await interaction.editReply({
                     content:
-                        `✅ Your ticket has been created: ${ticketChannel}`
+                        `✅ Your ticket has been created: ${ticketChannel}\n` +
+                        `🎫 Ticket ID: **#${ticketId}**\n` +
+                        `📊 Priority: **${priorityNames[priority]}**`
                 });
 
                 // ==========================================
@@ -526,7 +562,7 @@ module.exports = {
                 });
 
                 console.log(
-                    `🎫 Ticket created: ${ticketChannel.name} | Priority: ${priority}`
+                    `🎫 Ticket #${ticketId} created: ${ticketChannel.name} | Priority: ${priority}`
                 );
 
                 return;
@@ -638,12 +674,18 @@ module.exports = {
                 );
 
                 const embed = new EmbedBuilder()
+                    .setColor(0x5865F2)
                     .setTitle("👤 Ticket Claimed")
                     .setDescription(
                         `This ticket has been claimed by <@${interaction.user.id}>.\n\n` +
                         "🤖 Resolve AI support has been paused.\n" +
                         "👤 Human support is now handling this ticket."
                     )
+                    .addFields({
+                        name: "📊 Status",
+                        value: "👤 Human Support Active",
+                        inline: true
+                    })
                     .setFooter({
                         text: "Resolve • Human Support"
                     })
@@ -752,10 +794,28 @@ module.exports = {
                 );
 
                 const closedEmbed = new EmbedBuilder()
+                    .setColor(0xED4245)
                     .setTitle("🔒 Ticket Closed")
                     .setDescription(
                         `This ticket was closed by <@${interaction.user.id}>.\n\n` +
                         "Thank you for contacting Resolve Support."
+                    )
+                    .addFields(
+                        {
+                            name: "🎫 Ticket",
+                            value: `#${ticket.id}`,
+                            inline: true
+                        },
+                        {
+                            name: "👤 Closed By",
+                            value: `<@${interaction.user.id}>`,
+                            inline: true
+                        },
+                        {
+                            name: "📊 Status",
+                            value: "🔒 Closed",
+                            inline: true
+                        }
                     )
                     .setFooter({
                         text: "Resolve • AI Support"
