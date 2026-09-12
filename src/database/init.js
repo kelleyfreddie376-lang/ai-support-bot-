@@ -53,6 +53,7 @@ async function initDatabase() {
             status TEXT NOT NULL DEFAULT 'open',
             priority TEXT NOT NULL DEFAULT 'normal',
             claimed_by TEXT,
+            welcome_message_id TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             closed_at TIMESTAMPTZ
         );
@@ -95,6 +96,12 @@ async function initDatabase() {
         ALTER TABLE tickets
         ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal';
 
+        ALTER TABLE tickets
+        ADD COLUMN IF NOT EXISTS welcome_message_id TEXT;
+
+        ALTER TABLE knowledge
+        ADD COLUMN IF NOT EXISTS source_channel_id TEXT;
+
         ALTER TABLE achievements
         ADD COLUMN IF NOT EXISTS emoji TEXT;
 
@@ -121,6 +128,9 @@ async function initDatabase() {
 
         CREATE INDEX IF NOT EXISTS idx_achievements_guild
             ON achievements(guild_id);
+
+        CREATE INDEX IF NOT EXISTS idx_knowledge_source_channel
+            ON knowledge(guild_id, source_channel_id);
     `);
 
     console.log("✅ Database initialized successfully.");

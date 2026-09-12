@@ -10,8 +10,7 @@ const {
 const SUPPORT_SERVER_ID = "1545866787059671100";
 
 /*
- * These are the official Resolve Support Server channels
- * that Resolve is allowed to learn from automatically.
+ * Official Resolve Support Server knowledge channels.
  */
 const AUTO_KNOWLEDGE_CHANNELS = [
     "📜・rules",
@@ -28,7 +27,7 @@ const AUTO_KNOWLEDGE_CHANNELS = [
 ];
 
 /*
- * Get all useful text from a Discord message.
+ * Get useful text from a Discord message.
  */
 function getMessageKnowledge(message) {
     const parts = [];
@@ -61,7 +60,7 @@ function getMessageKnowledge(message) {
 }
 
 /*
- * Check whether this is one of the official knowledge channels.
+ * Check whether this is an automatic knowledge channel.
  */
 function isAutomaticKnowledgeChannel(message) {
     if (!message.guild) return false;
@@ -76,7 +75,7 @@ function isAutomaticKnowledgeChannel(message) {
 }
 
 /*
- * Save a new message into the knowledge database.
+ * Save information from official knowledge channels.
  */
 async function saveAutomaticKnowledge(message) {
     try {
@@ -94,20 +93,11 @@ async function saveAutomaticKnowledge(message) {
             return false;
         }
 
-        /*
-         * Make sure the source_channel_id column exists.
-         */
         await db.query(`
             ALTER TABLE knowledge
             ADD COLUMN IF NOT EXISTS source_channel_id TEXT
         `);
 
-        /*
-         * Store each important message separately.
-         *
-         * This makes updates easier to manage than replacing
-         * the entire channel's knowledge every time.
-         */
         await db.query(
             `
             INSERT INTO knowledge (
@@ -133,28 +123,28 @@ async function saveAutomaticKnowledge(message) {
             `🧠 Knowledge learned from #${message.channel.name}: ${message.id}`
         );
 
-        /*
-         * Tell staff that Resolve successfully learned it.
-         */
         try {
-            const confirmationEmbed = new EmbedBuilder()
-                .setTitle("🧠 Knowledge Updated")
-                .setDescription(
-                    "Resolve automatically added this information to its support knowledge."
-                )
-                .addFields({
-                    name: "📚 Source",
-                    value: `<#${message.channel.id}>`,
-                    inline: true
-                })
-                .setFooter({
-                    text: "Resolve • Automatic Knowledge"
-                })
-                .setTimestamp();
+            const confirmationEmbed =
+                new EmbedBuilder()
+                    .setColor(0x5865F2)
+                    .setTitle("🧠 Knowledge Updated")
+                    .setDescription(
+                        "Resolve automatically added this information to its support knowledge."
+                    )
+                    .addFields({
+                        name: "📚 Source",
+                        value: `<#${message.channel.id}>`,
+                        inline: true
+                    })
+                    .setFooter({
+                        text: "Resolve • Automatic Knowledge"
+                    })
+                    .setTimestamp();
 
             await message.channel.send({
                 embeds: [confirmationEmbed]
             });
+
         } catch (error) {
             console.error(
                 "⚠️ Could not send knowledge confirmation:",
@@ -175,7 +165,7 @@ async function saveAutomaticKnowledge(message) {
 }
 
 /*
- * Retrieve approved knowledge for the current server.
+ * Retrieve approved knowledge.
  */
 async function getServerKnowledge(guildId) {
     try {
@@ -197,10 +187,7 @@ async function getServerKnowledge(guildId) {
         return result.rows;
 
     } catch (error) {
-        /*
-         * Some older databases may not have updated_at.
-         * Fall back to created_at.
-         */
+
         try {
             const result = await db.query(
                 `
@@ -231,7 +218,7 @@ async function getServerKnowledge(guildId) {
 }
 
 /*
- * Build the knowledge section for Gemini.
+ * Build knowledge context for Gemini.
  */
 function buildKnowledgeContext(knowledge) {
     if (!knowledge.length) {
@@ -242,14 +229,10 @@ Do not invent server-specific information.
 `;
     }
 
-    /*
-     * Prevent an extremely large database from creating
-     * an unnecessarily huge AI prompt.
-     */
     const MAX_KNOWLEDGE_LENGTH = 30000;
 
     let context = "";
-    
+
     for (const item of knowledge) {
         const section =
             `\n--- ${item.title} ---\n` +
@@ -274,28 +257,166 @@ END APPROVED SERVER KNOWLEDGE.
 `;
 }
 
+/*
+ * Update the original ticket welcome embed.
+ */
+async function updateTicketStatusEmbed({
+    message,
+    status,
+    priority,
+    claimedBy
+}) {
+    try {
+        if (!message) return false;
+
+        const priorityNames = {
+            low: "🟢 Low",
+            normal: "🔵 Normal",
+            high: "🟠 High",
+            urgent: "🔴 Urgent"
+        };
+
+        const priorityColors = {
+            low: 0x57F287,
+            normal: 0x5865F2,
+            high: 0xFEE75C,
+            urgent: 0xED4245
+        };
+
+        let statusText = "🤖 AI Support Active";
+
+        let statusDescription =
+            "Resolve AI is reviewing your messages using verified server knowledge.";
+
+        if (status === "human") {
+            statusText = "👤 Human Support Active";
+
+            statusDescription =
+                claimedBy
+                    ? `A Support Team member has taken over this ticket.\n\n👤 **Claimed By:** <@${claimedBy}>`
+                    : "Resolve could not confidently answer your question. The Support Team has been notified.";
+        }
+
+        if (status === "closed") {
+            statusText = "🔒 Closed";
+
+            statusDescription =
+                "This support ticket has been closed.";
+        }
+
+        const oldEmbed = message.embeds[0];
+
+        if (!oldEmbed) return false;
+
+        const ticketId =
+            oldEmbed.fields.find(
+                field => field.name === "🆔 Ticket ID"
+            )?.value || "Unknown";
+
+        const updatedEmbed =
+            new EmbedBuilder()
+                .setColor(
+                    status === "closed"
+                        ? 0xED4245
+                        : status === "human"
+                            ? 0x9B59B6
+                            : priorityColors[priority] || 0x5865F2
+                )
+                .setTitle(
+                    "🎫 Resolve Support Ticket"
+                )
+                .setDescription(
+                    oldEmbed.description ||
+                    "Your private Resolve support ticket."
+                )
+                .addFields(
+                    {
+                        name: "🆔 Ticket ID",
+                        value: ticketId,
+                        inline: true
+                    },
+                    {
+                        name: "📊 Priority",
+                        value:
+                            priorityNames[priority] ||
+                            "🔵 Normal",
+                        inline: true
+                    },
+                    {
+                        name: "📌 Status",
+                        value: statusText,
+                        inline: true
+                    },
+                    {
+                        name: "🤖 Resolve AI",
+                        value:
+                            status === "human" ||
+                            status === "closed"
+                                ? "AI support is no longer responding in this ticket."
+                                : "I'll use verified server knowledge to help answer your question. I won't guess when the information isn't available.",
+                        inline: false
+                    },
+                    {
+                        name: "👤 Human Support",
+                        value: statusDescription,
+                        inline: false
+                    },
+                    {
+                        name: "📝 What to do next",
+                        value:
+                            status === "closed"
+                                ? "This ticket is closed."
+                                : status === "human"
+                                    ? "Please wait for the Support Team to assist you."
+                                    : "Describe your issue clearly in your next message.",
+                        inline: false
+                    }
+                )
+                .setFooter({
+                    text:
+                        status === "human"
+                            ? "Resolve • Human Support"
+                            : status === "closed"
+                                ? "Resolve • Ticket Closed"
+                                : `Resolve • ${priorityNames[priority] || "Normal"} Priority`
+                })
+                .setTimestamp();
+
+        await message.edit({
+            embeds: [updatedEmbed]
+        });
+
+        return true;
+
+    } catch (error) {
+        console.error(
+            "⚠️ Could not update ticket status embed:",
+            error
+        );
+
+        return false;
+    }
+}
+
 module.exports = {
     name: "messageCreate",
 
     async execute(message) {
         try {
+
             if (message.author.bot) return;
 
-            /*
-             * ==========================================
-             * AUTOMATIC KNOWLEDGE WATCHER
-             * ==========================================
-             */
+            // ==========================================
+            // AUTOMATIC KNOWLEDGE WATCHER
+            // ==========================================
 
             if (isAutomaticKnowledgeChannel(message)) {
                 await saveAutomaticKnowledge(message);
             }
 
-            /*
-             * ==========================================
-             * ACHIEVEMENTS
-             * ==========================================
-             */
+            // ==========================================
+            // ACHIEVEMENTS
+            // ==========================================
 
             if (
                 message.guild &&
@@ -308,11 +429,9 @@ module.exports = {
                 );
             }
 
-            /*
-             * ==========================================
-             * TICKET SYSTEM
-             * ==========================================
-             */
+            // ==========================================
+            // TICKET SYSTEM
+            // ==========================================
 
             if (!message.channel.name?.startsWith("ticket-")) {
                 return;
@@ -339,7 +458,8 @@ module.exports = {
             }
 
             /*
-             * Once a human takes over, AI stops responding.
+             * Once human support takes over,
+             * Resolve stops responding.
              */
             if (ticket.status === "human") {
                 return;
@@ -367,11 +487,9 @@ module.exports = {
                 return;
             }
 
-            /*
-             * ==========================================
-             * TICKET ACHIEVEMENTS
-             * ==========================================
-             */
+            // ==========================================
+            // TICKET ACHIEVEMENTS
+            // ==========================================
 
             await awardAchievement({
                 guild: message.guild,
@@ -393,11 +511,9 @@ module.exports = {
                 emoji: "🧠"
             });
 
-            /*
-             * ==========================================
-             * LOAD SERVER KNOWLEDGE
-             * ==========================================
-             */
+            // ==========================================
+            // LOAD SERVER KNOWLEDGE
+            // ==========================================
 
             const knowledge =
                 await getServerKnowledge(
@@ -411,11 +527,9 @@ module.exports = {
 
             await message.channel.sendTyping();
 
-            /*
-             * ==========================================
-             * GEMINI PROMPT
-             * ==========================================
-             */
+            // ==========================================
+            // GEMINI PROMPT
+            // ==========================================
 
             const prompt = `
 You are Resolve, an AI-powered support assistant for a Discord server.
@@ -437,7 +551,7 @@ IMPORTANT RULES:
 - Treat the approved server knowledge as the authoritative source for server-specific information.
 - Never invent server rules, policies, commands, prices, procedures, events, dates, features, or other information.
 - Never guess.
-- If the approved knowledge does not contain enough information to confidently answer the question, do NOT make up an answer.
+- If the approved server knowledge does not contain enough information to confidently answer the question, do NOT make up an answer.
 - If you cannot confidently answer using the approved knowledge, request human support.
 - General knowledge is okay when it does not conflict with server-specific information.
 - If server-specific information is required and it is not present in the approved knowledge, request human support.
@@ -449,7 +563,8 @@ HANDOFF_NEEDED
 When requesting human support, briefly explain why you cannot confidently answer.
 `;
 
-            const answer = await askGemini(prompt);
+            const answer =
+                await askGemini(prompt);
 
             if (!answer) {
                 return;
@@ -458,17 +573,16 @@ When requesting human support, briefly explain why you cannot confidently answer
             const trimmedAnswer =
                 answer.trim();
 
-            /*
-             * ==========================================
-             * HUMAN HANDOFF
-             * ==========================================
-             */
+            // ==========================================
+            // HUMAN HANDOFF
+            // ==========================================
 
             if (
                 trimmedAnswer.startsWith(
                     "HANDOFF_NEEDED"
                 )
             ) {
+
                 await db.query(
                     `
                     UPDATE tickets
@@ -487,8 +601,39 @@ When requesting human support, briefly explain why you cannot confidently answer
                         )
                         .trim();
 
+                // ==========================================
+                // UPDATE ORIGINAL WELCOME EMBED
+                // ==========================================
+
+                if (ticket.welcome_message_id) {
+                    try {
+                        const welcomeMessage =
+                            await message.channel.messages.fetch(
+                                ticket.welcome_message_id
+                            );
+
+                        await updateTicketStatusEmbed({
+                            message: welcomeMessage,
+                            status: "human",
+                            priority: ticket.priority,
+                            claimedBy: null
+                        });
+
+                    } catch (error) {
+                        console.error(
+                            "⚠️ Could not update original ticket welcome message:",
+                            error
+                        );
+                    }
+                }
+
+                // ==========================================
+                // HUMAN SUPPORT MESSAGE
+                // ==========================================
+
                 const handoffEmbed =
                     new EmbedBuilder()
+                        .setColor(0x9B59B6)
                         .setTitle(
                             "👤 Human Support Needed"
                         )
@@ -496,9 +641,15 @@ When requesting human support, briefly explain why you cannot confidently answer
                             cleanAnswer ||
                             "I don't have enough information to confidently answer this. A member of the Support Team will help you."
                         )
+                        .addFields({
+                            name: "📌 Ticket Status",
+                            value:
+                                "👤 Human Support Active",
+                            inline: true
+                        })
                         .setFooter({
                             text:
-                                "Resolve • AI Support"
+                                "Resolve • Human Support"
                         })
                         .setTimestamp();
 
@@ -508,9 +659,11 @@ When requesting human support, briefly explain why you cannot confidently answer
                     ]
                 });
 
-                if (
-                    settings.support_role_id
-                ) {
+                // ==========================================
+                // NOTIFY SUPPORT TEAM
+                // ==========================================
+
+                if (settings.support_role_id) {
                     await message.channel.send({
                         content:
                             `<@&${settings.support_role_id}> 🔔 **Human support is needed in this ticket.**`
@@ -529,11 +682,9 @@ When requesting human support, briefly explain why you cannot confidently answer
                 return;
             }
 
-            /*
-             * ==========================================
-             * NORMAL AI RESPONSE
-             * ==========================================
-             */
+            // ==========================================
+            // NORMAL AI RESPONSE
+            // ==========================================
 
             await message.reply({
                 content:
