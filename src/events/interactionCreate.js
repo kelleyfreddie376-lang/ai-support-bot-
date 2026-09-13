@@ -57,18 +57,306 @@ module.exports = {
         }
 
         // ==========================================
-        // BUTTONS / MODALS
+        // ONLY HANDLE BUTTONS / MODALS
         // ==========================================
 
-        if (!interaction.isButton() && !interaction.isModalSubmit()) return;
+        if (!interaction.isButton() && !interaction.isModalSubmit()) {
+            return;
+        }
 
         const customId = interaction.customId;
+
+        // ==========================================
+        // SAVE ANSWER MODAL SUBMIT
+        // IMPORTANT: THIS MUST BE BEFORE BUTTONS
+        // ==========================================
+
+        if (
+            interaction.isModalSubmit() &&
+            customId.startsWith("ticket_save_answer_modal_")
+        ) {
+            try {
+                const ticketId = customId.replace(
+                    "ticket_save_answer_modal_",
+                    ""
+                );
+
+                const question =
+                    interaction.fields
+                        .getTextInputValue("knowledge_question")
+                        .trim();
+
+                const answer =
+                    interaction.fields
+                        .getTextInputValue("knowledge_answer")
+                        .trim();
+
+                if (!question || !answer) {
+                    return interaction.reply({
+                        content:
+                            "❌ Both the question and answer are required.",
+                        ephemeral: true
+                    });
+                }
+
+                // ==========================================
+                // FIND CLOSED TICKET
+                // ==========================================
+
+                const ticketResult = await db.query(
+                    `
+                    SELECT *
+                    FROM tickets
+                    WHERE id = $1
+                    AND guild_id = $2
+                    AND status = 'closed'
+                    LIMIT 1
+                    `,
+                    [
+                        ticketId,
+                        interaction.guild.id
+                    ]
+                );
+
+                if (ticketResult.rows.length === 0) {
+                    return interaction.reply({
+                        content:
+                            "❌ This closed ticket could not be found.",
+                        ephemeral: true
+                    });
+                }
+
+                // ==========================================
+                // GET SUPPORT ROLE
+                // ==========================================
+
+                const settingsResult = await db.query(
+                    `
+                    SELECT support_role_id
+                    FROM guild_settings
+                    WHERE guild_id = $1
+                    LIMIT 1
+                    `,
+                    [interaction.guild.id]
+                );
+
+                const supportRoleId =
+                    settingsResult.rows[0]?.support_role_id;
+
+                const isSupport =
+                    supportRoleId &&
+                    interaction.member.roles.cache.has(
+                        supportRoleId
+                    );
+
+                const isAdmin =
+                    interaction.member.permissions.has(
+                        PermissionFlagsBits.ManageGuild
+                    );
+
+                if (!isSupport && !isAdmin) {
+                    return interaction.reply({
+                        content:
+                            "❌ Only the Support Team or a server manager can save answers.",
+                        ephemeral: true
+                    });
+                }
+
+                // ==========================================
+                // VALIDATE QUESTION
+                // ==========================================
+
+                if (question.length < 3) {
+                    return interaction.reply({
+                        content:
+                            "❌ The question is too short.",
+                        ephemeral: true
+                    });
+                }
+
+                if (answer.length < 3) {
+                    return interaction.reply({
+                        content:
+                            "❌ The answer is too short.",
+                        ephemeral: true
+                    });
+                }
+
+                // ==========================================
+                // CHECK FOR DUPLICATE KNOWLEDGE
+                // ==========================================
+
+                const existingKnowledge = await db.query(
+                    `
+                    SELECT id
+                    FROM knowledge
+                    WHERE guild_id = $1
+                    AND LOWER(title) = LOWER($2)
+                    AND LOWER(content) = LOWER($3)
+                    LIMIT 1
+                    `,
+                    [
+                        interaction.guild.id,
+                        question,
+                        answer
+                    ]
+                );
+
+                if (existingKnowledge.rows.length > 0) {
+                    return interaction.reply({
+                        content:
+                            "ℹ️ This exact question and answer is already in Resolve's approved knowledge.",
+                        ephemeral: true
+                    });
+                }
+
+                // ==========================================
+                // SAVE KNOWLEDGE
+                // ==========================================
+
+                const client = await db.connect();
+
+                try {
+                    await client.query("BEGIN");
+
+                    await client.query(
+                        `
+                        INSERT INTO knowledge (
+                            guild_id,
+                            title,
+                            content,
+                            created_by,
+                            approved,
+                            updated_at
+                        )
+                        VALUES (
+                            $1,
+                            $2,
+                            $3,
+                            $4,
+                            TRUE,
+                            NOW()
+                        )
+                        `,
+                        [
+                            interaction.guild.id,
+                            question,
+                            answer,
+                            interaction.user.id
+                        ]
+                    );
+
+                    await client.query(
+                        `
+                        INSERT INTO approved_answers (
+                            guild_id,
+                            question,
+                            answer,
+                            approved_by
+                        )
+                        VALUES (
+                            $1,
+                            $2,
+                            $3,
+                            $4
+                        )
+                        `,
+                        [
+                            interaction.guild.id,
+                            question,
+                            answer,
+                            interaction.user.id
+                        ]
+                    );
+
+                    await client.query("COMMIT");
+
+                } catch (databaseError) {
+                    await client.query("ROLLBACK");
+                    throw databaseError;
+
+                } finally {
+                    client.release();
+                }
+
+                // ==========================================
+                // SUCCESS EMBED
+                // ==========================================
+
+                const savedEmbed =
+                    new EmbedBuilder()
+                        .setColor(0x57F287)
+                        .setTitle("🧠 Answer Saved Successfully")
+                        .setDescription(
+                            "Resolve has added this answer to the server's approved AI knowledge."
+                        )
+                        .addFields(
+                            {
+                                name: "❓ Question",
+                                value: question,
+                                inline: false
+                            },
+                            {
+                                name: "💡 Approved Answer",
+                                value: answer,
+                                inline: false
+                            },
+                            {
+                                name: "👤 Saved By",
+                                value:
+                                    `<@${interaction.user.id}>`,
+                                inline: true
+                            },
+                            {
+                                name: "🔐 Knowledge Status",
+                                value: "✅ Approved",
+                                inline: true
+                            }
+                        )
+                        .setFooter({
+                            text:
+                                "Resolve • AI Knowledge"
+                        })
+                        .setTimestamp();
+
+                console.log(
+                    `🧠 Knowledge saved for ticket #${ticketId} by ${interaction.user.tag}`
+                );
+
+                return interaction.reply({
+                    embeds: [savedEmbed],
+                    ephemeral: true
+                });
+
+            } catch (error) {
+                console.error(
+                    "❌ Save answer modal error:",
+                    error
+                );
+
+                if (
+                    !interaction.replied &&
+                    !interaction.deferred
+                ) {
+                    return interaction.reply({
+                        content:
+                            "❌ I couldn't save this answer. Check the bot console logs for the exact database error.",
+                        ephemeral: true
+                    });
+                }
+
+                return;
+            }
+        }
 
         // ==========================================
         // KNOWLEDGE APPROVE
         // ==========================================
 
-        if (customId.startsWith("knowledge_approve_")) {
+        if (
+            interaction.isButton() &&
+            customId.startsWith("knowledge_approve_")
+        ) {
             const knowledgeId = customId.replace(
                 "knowledge_approve_",
                 ""
@@ -132,7 +420,8 @@ module.exports = {
                         },
                         {
                             name: "👤 Verified By",
-                            value: `<@${interaction.user.id}>`,
+                            value:
+                                `<@${interaction.user.id}>`,
                             inline: true
                         },
                         {
@@ -142,7 +431,8 @@ module.exports = {
                         }
                     )
                     .setFooter({
-                        text: "Resolve • Knowledge Verification"
+                        text:
+                            "Resolve • Knowledge Verification"
                     })
                     .setTimestamp();
 
@@ -163,7 +453,10 @@ module.exports = {
                     error
                 );
 
-                if (!interaction.replied && !interaction.deferred) {
+                if (
+                    !interaction.replied &&
+                    !interaction.deferred
+                ) {
                     await interaction.reply({
                         content:
                             "❌ I couldn't verify this knowledge item.",
@@ -179,7 +472,10 @@ module.exports = {
         // KNOWLEDGE REJECT
         // ==========================================
 
-        if (customId.startsWith("knowledge_reject_")) {
+        if (
+            interaction.isButton() &&
+            customId.startsWith("knowledge_reject_")
+        ) {
             const knowledgeId = customId.replace(
                 "knowledge_reject_",
                 ""
@@ -193,7 +489,7 @@ module.exports = {
                 ) {
                     return interaction.reply({
                         content:
-                            "❌ Only server managers can verify knowledge.",
+                            "❌ Only server managers can reject knowledge.",
                         ephemeral: true
                     });
                 }
@@ -236,7 +532,8 @@ module.exports = {
                         },
                         {
                             name: "👤 Rejected By",
-                            value: `<@${interaction.user.id}>`,
+                            value:
+                                `<@${interaction.user.id}>`,
                             inline: true
                         },
                         {
@@ -246,7 +543,8 @@ module.exports = {
                         }
                     )
                     .setFooter({
-                        text: "Resolve • Knowledge Verification"
+                        text:
+                            "Resolve • Knowledge Verification"
                     })
                     .setTimestamp();
 
@@ -267,7 +565,10 @@ module.exports = {
                     error
                 );
 
-                if (!interaction.replied && !interaction.deferred) {
+                if (
+                    !interaction.replied &&
+                    !interaction.deferred
+                ) {
                     await interaction.reply({
                         content:
                             "❌ I couldn't reject this knowledge item.",
@@ -283,8 +584,10 @@ module.exports = {
         // TICKET PRIORITY BUTTONS
         // ==========================================
 
-        if (customId.startsWith("ticket_priority_")) {
-
+        if (
+            interaction.isButton() &&
+            customId.startsWith("ticket_priority_")
+        ) {
             const priority = customId.replace(
                 "ticket_priority_",
                 ""
@@ -306,246 +609,252 @@ module.exports = {
 
             if (!priorityNames[priority]) {
                 return interaction.reply({
-                    content: "❌ Invalid ticket priority.",
+                    content:
+                        "❌ Invalid ticket priority.",
                     ephemeral: true
                 });
             }
 
             try {
+                const existingTicket =
+                    await db.query(
+                        `
+                        SELECT *
+                        FROM tickets
+                        WHERE guild_id = $1
+                        AND user_id = $2
+                        AND status IN ('open', 'human')
+                        LIMIT 1
+                        `,
+                        [
+                            interaction.guild.id,
+                            interaction.user.id
+                        ]
+                    );
 
-                // ==========================================
-                // CHECK FOR EXISTING TICKET
-                // ==========================================
+                if (
+                    existingTicket.rows.length > 0
+                ) {
+                    const existingChannel =
+                        interaction.guild.channels.cache.get(
+                            existingTicket.rows[0].channel_id
+                        );
 
-                const existingTicket = await db.query(
-                    `
-                    SELECT *
-                    FROM tickets
-                    WHERE guild_id = $1
-                    AND user_id = $2
-                    AND status IN ('open', 'human')
-                    LIMIT 1
-                    `,
-                    [
-                        interaction.guild.id,
-                        interaction.user.id
-                    ]
-                );
+                    if (existingChannel) {
+                        return interaction.reply({
+                            content:
+                                `❌ You already have an open ticket: ${existingChannel}`,
+                            ephemeral: true
+                        });
+                    }
 
-                if (existingTicket.rows.length > 0) {
+                    await db.query(
+                        `
+                        DELETE FROM tickets
+                        WHERE id = $1
+                        `,
+                        [
+                            existingTicket.rows[0].id
+                        ]
+                    );
+                }
 
-                    const existing = existingTicket.rows[0];
+                const settingsResult =
+                    await db.query(
+                        `
+                        SELECT
+                            support_role_id,
+                            ticket_category_id
+                        FROM guild_settings
+                        WHERE guild_id = $1
+                        LIMIT 1
+                        `,
+                        [interaction.guild.id]
+                    );
 
+                const settings =
+                    settingsResult.rows[0];
+
+                if (!settings) {
                     return interaction.reply({
                         content:
-                            existing.status === "human"
-                                ? "❌ You already have a support ticket waiting for the Support Team."
-                                : "❌ You already have an open support ticket.",
+                            "❌ This server hasn't been set up yet. Ask a server manager to run `/setup`.",
                         ephemeral: true
                     });
                 }
-
-                // ==========================================
-                // GET SERVER SETTINGS
-                // ==========================================
-
-                const settingsResult = await db.query(
-                    `
-                    SELECT support_role_id, ticket_category_id
-                    FROM guild_settings
-                    WHERE guild_id = $1
-                    LIMIT 1
-                    `,
-                    [interaction.guild.id]
-                );
-
-                if (settingsResult.rows.length === 0) {
-                    return interaction.reply({
-                        content:
-                            "❌ This server hasn't been set up yet. An administrator needs to run `/setup` first.",
-                        ephemeral: true
-                    });
-                }
-
-                const settings = settingsResult.rows[0];
 
                 const supportRole =
-                    interaction.guild.roles.cache.get(
-                        settings.support_role_id
-                    );
+                    settings.support_role_id
+                        ? interaction.guild.roles.cache.get(
+                            settings.support_role_id
+                        )
+                        : null;
 
                 const category =
-                    interaction.guild.channels.cache.get(
-                        settings.ticket_category_id
-                    );
+                    settings.ticket_category_id
+                        ? interaction.guild.channels.cache.get(
+                            settings.ticket_category_id
+                        )
+                        : null;
 
-                if (!category) {
-                    return interaction.reply({
-                        content:
-                            "❌ The configured ticket category could not be found.",
-                        ephemeral: true
+                const permissionOverwrites = [
+                    {
+                        id:
+                            interaction.guild.roles.everyone.id,
+                        deny: [
+                            PermissionFlagsBits.ViewChannel
+                        ]
+                    },
+                    {
+                        id: interaction.user.id,
+                        allow: [
+                            PermissionFlagsBits.ViewChannel,
+                            PermissionFlagsBits.SendMessages,
+                            PermissionFlagsBits.ReadMessageHistory,
+                            PermissionFlagsBits.AttachFiles,
+                            PermissionFlagsBits.EmbedLinks
+                        ]
+                    }
+                ];
+
+                if (supportRole) {
+                    permissionOverwrites.push({
+                        id: supportRole.id,
+                        allow: [
+                            PermissionFlagsBits.ViewChannel,
+                            PermissionFlagsBits.SendMessages,
+                            PermissionFlagsBits.ReadMessageHistory,
+                            PermissionFlagsBits.AttachFiles,
+                            PermissionFlagsBits.EmbedLinks
+                        ]
                     });
                 }
 
-                await interaction.deferReply({
-                    ephemeral: true
-                });
-
-                // ==========================================
-                // CREATE TICKET CHANNEL
-                // ==========================================
-
-                const ticketChannel =
+                const channel =
                     await interaction.guild.channels.create({
-                        name: `ticket-${interaction.user.username}`,
+                        name:
+                            `ticket-${interaction.user.username}`
+                                .toLowerCase()
+                                .replace(
+                                    /[^a-z0-9-]/g,
+                                    ""
+                                )
+                                .slice(0, 80),
                         type: ChannelType.GuildText,
-                        parent: category.id,
+                        parent:
+                            category &&
+                            category.type ===
+                                ChannelType.GuildCategory
+                                ? category.id
+                                : null,
+                        permissionOverwrites
+                    });
 
-                        permissionOverwrites: [
+                const ticketResult =
+                    await db.query(
+                        `
+                        INSERT INTO tickets (
+                            guild_id,
+                            channel_id,
+                            user_id,
+                            status,
+                            priority
+                        )
+                        VALUES (
+                            $1,
+                            $2,
+                            $3,
+                            'open',
+                            $4
+                        )
+                        RETURNING id
+                        `,
+                        [
+                            interaction.guild.id,
+                            channel.id,
+                            interaction.user.id,
+                            priority
+                        ]
+                    );
+
+                const ticketId =
+                    ticketResult.rows[0].id;
+
+                const welcomeEmbed =
+                    new EmbedBuilder()
+                        .setColor(
+                            priorityColors[priority]
+                        )
+                        .setTitle(
+                            "🎫 Resolve Support Ticket"
+                        )
+                        .setDescription(
+                            `Welcome <@${interaction.user.id}>!\n\n` +
+                            `Your **${priorityNames[priority]}** priority ticket has been created.\n\n` +
+                            `🤖 **Resolve AI** is reviewing your question.\n` +
+                            `👥 If Resolve cannot confidently answer, the **Support Team** will be notified.\n\n` +
+                            `Please explain your issue clearly so we can help you faster.`
+                        )
+                        .addFields(
                             {
-                                id: interaction.guild.id,
-                                deny: [
-                                    PermissionFlagsBits.ViewChannel
-                                ]
+                                name: "📊 Priority",
+                                value:
+                                    priorityNames[priority],
+                                inline: true
                             },
                             {
-                                id: interaction.user.id,
-                                allow: [
-                                    PermissionFlagsBits.ViewChannel,
-                                    PermissionFlagsBits.SendMessages,
-                                    PermissionFlagsBits.ReadMessageHistory
-                                ]
-                            },
-                            ...(supportRole
-                                ? [
-                                    {
-                                        id: supportRole.id,
-                                        allow: [
-                                            PermissionFlagsBits.ViewChannel,
-                                            PermissionFlagsBits.SendMessages,
-                                            PermissionFlagsBits.ReadMessageHistory
-                                        ]
-                                    }
-                                ]
-                                : [])
+                                name: "📌 Status",
+                                value:
+                                    "🤖 AI Reviewing",
+                                inline: true
+                            }
+                        )
+                        .setFooter({
+                            text:
+                                `Resolve • Ticket #${ticketId}`
+                        })
+                        .setTimestamp();
+
+                const ticketButtons =
+                    new ActionRowBuilder().addComponents(
+                        new ButtonBuilder()
+                            .setCustomId(
+                                `ticket_claim_${ticketId}`
+                            )
+                            .setLabel("Claim")
+                            .setEmoji("🙋")
+                            .setStyle(
+                                ButtonStyle.Primary
+                            ),
+
+                        new ButtonBuilder()
+                            .setCustomId(
+                                `ticket_close_${ticketId}`
+                            )
+                            .setLabel("Close")
+                            .setEmoji("🔒")
+                            .setStyle(
+                                ButtonStyle.Danger
+                            )
+                    );
+
+                const welcomeMessage =
+                    await channel.send({
+                        content:
+                            `<@${interaction.user.id}>` +
+                            (
+                                supportRole
+                                    ? ` ${supportRole}`
+                                    : ""
+                            ),
+                        embeds: [
+                            welcomeEmbed
+                        ],
+                        components: [
+                            ticketButtons
                         ]
                     });
 
-                // ==========================================
-                // SAVE TICKET
-                // ==========================================
-
-                const ticketResult = await db.query(
-                    `
-                    INSERT INTO tickets (
-                        guild_id,
-                        channel_id,
-                        user_id,
-                        status,
-                        priority
-                    )
-                    VALUES ($1, $2, $3, 'open', $4)
-                    RETURNING id
-                    `,
-                    [
-                        interaction.guild.id,
-                        ticketChannel.id,
-                        interaction.user.id,
-                        priority
-                    ]
-                );
-
-                const ticketId = ticketResult.rows[0].id;
-
-                // ==========================================
-                // TICKET EMBED
-                // ==========================================
-
-                const embed = new EmbedBuilder()
-                    .setColor(priorityColors[priority])
-                    .setTitle("🎫 Resolve Support Ticket")
-                    .setDescription(
-                        `Welcome <@${interaction.user.id}>! 👋\n\n` +
-                        "Your private support ticket is ready.\n" +
-                        "Resolve AI will review your message using the server's verified knowledge.\n\n" +
-                        "If Resolve cannot confidently answer your question, a Support Team member can take over."
-                    )
-                    .addFields(
-                        {
-                            name: "🆔 Ticket ID",
-                            value: `#${ticketId}`,
-                            inline: true
-                        },
-                        {
-                            name: "📊 Priority",
-                            value: priorityNames[priority],
-                            inline: true
-                        },
-                        {
-                            name: "📌 Status",
-                            value: "🤖 AI Support Active",
-                            inline: true
-                        },
-                        {
-                            name: "🤖 Resolve AI",
-                            value:
-                                "I'll use verified server knowledge to help answer your question. I won't guess when the information isn't available.",
-                            inline: false
-                        },
-                        {
-                            name: "👤 Human Support",
-                            value:
-                                "Support Team members can claim this ticket whenever human assistance is needed.",
-                            inline: false
-                        },
-                        {
-                            name: "📝 What to do next",
-                            value:
-                                "Describe your issue clearly in your next message. Include relevant details so Resolve can help you faster.",
-                            inline: false
-                        }
-                    )
-                    .setFooter({
-                        text: `Resolve • ${priorityNames[priority]} Priority`
-                    })
-                    .setTimestamp();
-
-                // ==========================================
-                // TICKET BUTTONS
-                // ==========================================
-
-                const buttons =
-                    new ActionRowBuilder().addComponents(
-                        new ButtonBuilder()
-                            .setCustomId("ticket_claim")
-                            .setLabel("Claim Ticket")
-                            .setEmoji("👤")
-                            .setStyle(ButtonStyle.Primary),
-
-                        new ButtonBuilder()
-                            .setCustomId("ticket_close")
-                            .setLabel("Close Ticket")
-                            .setEmoji("🔒")
-                            .setStyle(ButtonStyle.Danger)
-                    );
-
-                // ==========================================
-                // SEND TICKET MESSAGE
-                // ==========================================
-
-                const welcomeMessage =
-                    await ticketChannel.send({
-                        content:
-                            `<@${interaction.user.id}>` +
-                            (supportRole
-                                ? ` <@&${supportRole.id}>`
-                                : ""),
-                        embeds: [embed],
-                        components: [buttons]
-                    });
-
-                // Save the welcome message ID so Resolve
-                // can update the original ticket embed later.
                 await db.query(
                     `
                     UPDATE tickets
@@ -558,29 +867,20 @@ module.exports = {
                     ]
                 );
 
-                await interaction.editReply({
+                await awardAchievement(
+                    interaction.guild,
+                    interaction.user.id,
+                    "first_ticket"
+                );
+
+                await interaction.reply({
                     content:
-                        `✅ Your ticket has been created: ${ticketChannel}\n` +
-                        `🎫 Ticket ID: **#${ticketId}**\n` +
-                        `📊 Priority: **${priorityNames[priority]}**`
-                });
-
-                // ==========================================
-                // FIRST TICKET ACHIEVEMENT
-                // ==========================================
-
-                await awardAchievement({
-                    guild: interaction.guild,
-                    userId: interaction.user.id,
-                    key: "first_ticket",
-                    name: "First Ticket",
-                    description:
-                        "You opened your first support ticket with Resolve!",
-                    emoji: "🎫"
+                        `🎫 Your ticket has been created: ${channel}`,
+                    ephemeral: true
                 });
 
                 console.log(
-                    `🎫 Ticket #${ticketId} created: ${ticketChannel.name} | Priority: ${priority}`
+                    `🎫 Ticket #${ticketId} created by ${interaction.user.tag} (${priority})`
                 );
 
                 return;
@@ -591,13 +891,11 @@ module.exports = {
                     error
                 );
 
-                if (interaction.deferred) {
-                    await interaction.editReply({
-                        content:
-                            "❌ I couldn't create your ticket. Please try again."
-                    });
-                } else {
-                    await interaction.reply({
+                if (
+                    !interaction.replied &&
+                    !interaction.deferred
+                ) {
+                    return interaction.reply({
                         content:
                             "❌ I couldn't create your ticket. Please try again.",
                         ephemeral: true
@@ -609,25 +907,49 @@ module.exports = {
         }
 
         // ==========================================
-        // TICKET CLAIM
+        // CLAIM TICKET
         // ==========================================
 
-        if (customId === "ticket_claim") {
-
+        if (
+            interaction.isButton() &&
+            customId.startsWith("ticket_claim_")
+        ) {
             try {
+                const ticketId =
+                    customId.replace(
+                        "ticket_claim_",
+                        ""
+                    );
 
-                const ticketResult = await db.query(
-                    `
-                    SELECT *
-                    FROM tickets
-                    WHERE channel_id = $1
-                    AND status IN ('open', 'human')
-                    LIMIT 1
-                    `,
-                    [interaction.channel.id]
-                );
+                const ticketResult =
+                    await db.query(
+                        `
+                        SELECT *
+                        FROM tickets
+                        WHERE id = $1
+                        AND guild_id = $2
+                        LIMIT 1
+                        `,
+                        [
+                            ticketId,
+                            interaction.guild.id
+                        ]
+                    );
 
-                if (ticketResult.rows.length === 0) {
+                if (
+                    ticketResult.rows.length === 0
+                ) {
+                    return interaction.reply({
+                        content:
+                            "❌ This ticket no longer exists.",
+                        ephemeral: true
+                    });
+                }
+
+                const ticket =
+                    ticketResult.rows[0];
+
+                if (ticket.status === "closed") {
                     return interaction.reply({
                         content:
                             "❌ This ticket is already closed.",
@@ -635,20 +957,20 @@ module.exports = {
                     });
                 }
 
-                const ticket = ticketResult.rows[0];
-
-                const settingsResult = await db.query(
-                    `
-                    SELECT support_role_id
-                    FROM guild_settings
-                    WHERE guild_id = $1
-                    LIMIT 1
-                    `,
-                    [interaction.guild.id]
-                );
+                const settingsResult =
+                    await db.query(
+                        `
+                        SELECT support_role_id
+                        FROM guild_settings
+                        WHERE guild_id = $1
+                        LIMIT 1
+                        `,
+                        [interaction.guild.id]
+                    );
 
                 const supportRoleId =
-                    settingsResult.rows[0]?.support_role_id;
+                    settingsResult.rows[0]
+                        ?.support_role_id;
 
                 const isSupport =
                     supportRoleId &&
@@ -664,7 +986,7 @@ module.exports = {
                 if (!isSupport && !isAdmin) {
                     return interaction.reply({
                         content:
-                            "❌ Only the Support Team can claim tickets.",
+                            "❌ Only the Support Team or server managers can claim tickets.",
                         ephemeral: true
                     });
                 }
@@ -672,7 +994,7 @@ module.exports = {
                 if (ticket.claimed_by) {
                     return interaction.reply({
                         content:
-                            `❌ This ticket is already claimed by <@${ticket.claimed_by}>.`,
+                            `❌ This ticket has already been claimed by <@${ticket.claimed_by}>.`,
                         ephemeral: true
                     });
                 }
@@ -683,50 +1005,130 @@ module.exports = {
                     SET claimed_by = $1,
                         status = 'human'
                     WHERE id = $2
-                    AND status IN ('open', 'human')
                     `,
                     [
                         interaction.user.id,
-                        ticket.id
+                        ticketId
                     ]
                 );
 
-                const embed = new EmbedBuilder()
-                    .setColor(0x5865F2)
-                    .setTitle("👤 Ticket Claimed")
-                    .setDescription(
-                        `This ticket has been claimed by <@${interaction.user.id}>.\n\n` +
-                        "🤖 Resolve AI support has been paused.\n" +
-                        "👤 Human support is now handling this ticket."
-                    )
-                    .addFields({
-                        name: "📊 Status",
-                        value: "👤 Human Support Active",
-                        inline: true
-                    })
-                    .setFooter({
-                        text: "Resolve • Human Support"
-                    })
-                    .setTimestamp();
+                const claimedEmbed =
+                    new EmbedBuilder()
+                        .setColor(0x5865F2)
+                        .setTitle(
+                            "🙋 Ticket Claimed"
+                        )
+                        .setDescription(
+                            `This ticket is now being handled by <@${interaction.user.id}>.\n\n` +
+                            `🤖 Resolve AI has stepped back so the Support Team can take over.`
+                        )
+                        .addFields(
+                            {
+                                name: "👤 Claimed By",
+                                value:
+                                    `<@${interaction.user.id}>`,
+                                inline: true
+                            },
+                            {
+                                name: "📌 Status",
+                                value:
+                                    "👥 Human Support",
+                                inline: true
+                            }
+                        )
+                        .setFooter({
+                            text:
+                                `Resolve • Ticket #${ticketId}`
+                        })
+                        .setTimestamp();
 
                 await interaction.reply({
-                    embeds: [embed]
+                    embeds: [
+                        claimedEmbed
+                    ]
                 });
 
+                // ==========================================
+                // UPDATE ORIGINAL WELCOME EMBED
+                // ==========================================
+
+                if (ticket.welcome_message_id) {
+                    try {
+                        const welcomeMessage =
+                            await interaction.channel.messages.fetch(
+                                ticket.welcome_message_id
+                            );
+
+                        if (welcomeMessage) {
+                            const originalEmbed =
+                                welcomeMessage.embeds[0];
+
+                            const updatedEmbed =
+                                new EmbedBuilder(
+                                    originalEmbed
+                                )
+                                    .setColor(0x5865F2)
+                                    .setFields(
+                                        {
+                                            name:
+                                                "📊 Priority",
+                                            value:
+                                                originalEmbed.fields.find(
+                                                    field =>
+                                                        field.name ===
+                                                        "📊 Priority"
+                                                )?.value ||
+                                                "🔵 Normal",
+                                            inline: true
+                                        },
+                                        {
+                                            name:
+                                                "📌 Status",
+                                            value:
+                                                "👥 Human Support",
+                                            inline: true
+                                        },
+                                        {
+                                            name:
+                                                "🙋 Claimed By",
+                                            value:
+                                                `<@${interaction.user.id}>`,
+                                            inline: true
+                                        }
+                                    );
+
+                            await welcomeMessage.edit({
+                                embeds: [
+                                    updatedEmbed
+                                ],
+                                components: []
+                            });
+                        }
+                    } catch (error) {
+                        console.error(
+                            "⚠️ Could not update ticket welcome message:",
+                            error
+                        );
+                    }
+                }
+
                 console.log(
-                    `👤 Ticket ${ticket.id} claimed by ${interaction.user.tag}`
+                    `🙋 Ticket #${ticketId} claimed by ${interaction.user.tag}`
                 );
 
                 return;
 
             } catch (error) {
                 console.error(
-                    "❌ Claim error:",
+                    "❌ Ticket claim error:",
                     error
                 );
 
-                if (!interaction.replied) {
-                    await interaction.reply({
+                if (
+                    !interaction.replied &&
+                    !interaction.deferred
+                ) {
+                    return interaction.reply({
                         content:
                             "❌ I couldn't claim this ticket.",
                         ephemeral: true
@@ -738,25 +1140,49 @@ module.exports = {
         }
 
         // ==========================================
-        // TICKET CLOSE
+        // CLOSE TICKET
         // ==========================================
 
-        if (customId === "ticket_close") {
-
+        if (
+            interaction.isButton() &&
+            customId.startsWith("ticket_close_")
+        ) {
             try {
+                const ticketId =
+                    customId.replace(
+                        "ticket_close_",
+                        ""
+                    );
 
-                const ticketResult = await db.query(
-                    `
-                    SELECT *
-                    FROM tickets
-                    WHERE channel_id = $1
-                    AND status IN ('open', 'human')
-                    LIMIT 1
-                    `,
-                    [interaction.channel.id]
-                );
+                const ticketResult =
+                    await db.query(
+                        `
+                        SELECT *
+                        FROM tickets
+                        WHERE id = $1
+                        AND guild_id = $2
+                        LIMIT 1
+                        `,
+                        [
+                            ticketId,
+                            interaction.guild.id
+                        ]
+                    );
 
-                if (ticketResult.rows.length === 0) {
+                if (
+                    ticketResult.rows.length === 0
+                ) {
+                    return interaction.reply({
+                        content:
+                            "❌ This ticket no longer exists.",
+                        ephemeral: true
+                    });
+                }
+
+                const ticket =
+                    ticketResult.rows[0];
+
+                if (ticket.status === "closed") {
                     return interaction.reply({
                         content:
                             "❌ This ticket is already closed.",
@@ -764,20 +1190,20 @@ module.exports = {
                     });
                 }
 
-                const ticket = ticketResult.rows[0];
-
-                const settingsResult = await db.query(
-                    `
-                    SELECT support_role_id
-                    FROM guild_settings
-                    WHERE guild_id = $1
-                    LIMIT 1
-                    `,
-                    [interaction.guild.id]
-                );
+                const settingsResult =
+                    await db.query(
+                        `
+                        SELECT support_role_id
+                        FROM guild_settings
+                        WHERE guild_id = $1
+                        LIMIT 1
+                        `,
+                        [interaction.guild.id]
+                    );
 
                 const supportRoleId =
-                    settingsResult.rows[0]?.support_role_id;
+                    settingsResult.rows[0]
+                        ?.support_role_id;
 
                 const isSupport =
                     supportRoleId &&
@@ -790,13 +1216,18 @@ module.exports = {
                         PermissionFlagsBits.ManageGuild
                     );
 
-                const isOwner =
-                    interaction.user.id === ticket.user_id;
+                const isTicketOwner =
+                    interaction.user.id ===
+                    ticket.user_id;
 
-                if (!isSupport && !isAdmin && !isOwner) {
+                if (
+                    !isSupport &&
+                    !isAdmin &&
+                    !isTicketOwner
+                ) {
                     return interaction.reply({
                         content:
-                            "❌ You don't have permission to close this ticket.",
+                            "❌ Only the ticket owner, Support Team, or a server manager can close this ticket.",
                         ephemeral: true
                     });
                 }
@@ -808,95 +1239,92 @@ module.exports = {
                         closed_at = NOW()
                     WHERE id = $1
                     `,
-                    [ticket.id]
+                    [ticketId]
                 );
 
-                const closedEmbed = new EmbedBuilder()
-                    .setColor(0xED4245)
-                    .setTitle("🔒 Ticket Closed")
-                    .setDescription(
-                        `This ticket was closed by <@${interaction.user.id}>.\n\n` +
-                        "Thank you for contacting Resolve Support!\n\n" +
-                        "🧠 **Did Resolve learn something useful?**\n" +
-                        "Support Team members can save the final question and answer to Resolve's approved knowledge before deleting this ticket."
-                    )
-                    .addFields(
-                        {
-                            name: "🎫 Ticket",
-                            value: `#${ticket.id}`,
-                            inline: true
-                        },
-                        {
-                            name: "👤 Closed By",
-                            value: `<@${interaction.user.id}>`,
-                            inline: true
-                        },
-                        {
-                            name: "📊 Status",
-                            value: "🔒 Closed",
-                            inline: true
-                        }
-                    )
-                    .setFooter({
-                        text: "Resolve • Ticket Closed"
-                    })
-                    .setTimestamp();
-
-                // ==========================================
-                // CLOSED TICKET BUTTONS
-                // ==========================================
+                const closedEmbed =
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle(
+                            "🔒 Ticket Closed"
+                        )
+                        .setDescription(
+                            `This ticket has been closed by <@${interaction.user.id}>.\n\n` +
+                            `If this ticket contained a useful solution, Support Team members can save the answer to Resolve's approved AI knowledge.`
+                        )
+                        .addFields(
+                            {
+                                name: "👤 Closed By",
+                                value:
+                                    `<@${interaction.user.id}>`,
+                                inline: true
+                            },
+                            {
+                                name: "📌 Status",
+                                value:
+                                    "🔒 Closed",
+                                inline: true
+                            }
+                        )
+                        .setFooter({
+                            text:
+                                `Resolve • Ticket #${ticketId}`
+                        })
+                        .setTimestamp();
 
                 const closedButtons =
                     new ActionRowBuilder().addComponents(
-
                         new ButtonBuilder()
                             .setCustomId(
-                                `ticket_save_answer_${ticket.id}`
+                                `ticket_save_answer_${ticketId}`
                             )
-                            .setLabel("Save Answer")
+                            .setLabel(
+                                "Save Answer"
+                            )
                             .setEmoji("🧠")
-                            .setStyle(ButtonStyle.Primary),
+                            .setStyle(
+                                ButtonStyle.Success
+                            ),
 
                         new ButtonBuilder()
                             .setCustomId(
-                                `ticket_delete_${ticket.id}`
+                                `ticket_delete_${ticketId}`
                             )
-                            .setLabel("Delete Ticket")
+                            .setLabel(
+                                "Delete Ticket"
+                            )
                             .setEmoji("🗑️")
-                            .setStyle(ButtonStyle.Danger)
-
+                            .setStyle(
+                                ButtonStyle.Danger
+                            )
                     );
 
                 await interaction.reply({
-                    embeds: [closedEmbed],
-                    components: [closedButtons]
-                });
-
-                await interaction.channel.permissionOverwrites.edit(
-                    ticket.user_id,
-                    {
-                        ViewChannel: false
-                    }
-                );
-
-                await interaction.message.edit({
-                    components: []
+                    embeds: [
+                        closedEmbed
+                    ],
+                    components: [
+                        closedButtons
+                    ]
                 });
 
                 console.log(
-                    `🔒 Ticket ${ticket.id} closed by ${interaction.user.tag}`
+                    `🔒 Ticket #${ticketId} closed by ${interaction.user.tag}`
                 );
 
                 return;
 
             } catch (error) {
                 console.error(
-                    "❌ Close error:",
+                    "❌ Ticket close error:",
                     error
                 );
 
-                if (!interaction.replied) {
-                    await interaction.reply({
+                if (
+                    !interaction.replied &&
+                    !interaction.deferred
+                ) {
+                    return interaction.reply({
                         content:
                             "❌ I couldn't close this ticket.",
                         ephemeral: true
@@ -908,56 +1336,68 @@ module.exports = {
         }
 
         // ==========================================
-        // SAVE ANSWER FROM CLOSED TICKET
+        // SAVE ANSWER BUTTON
         // ==========================================
 
-        if (customId.startsWith("ticket_save_answer_")) {
-
+        if (
+            interaction.isButton() &&
+            customId.startsWith("ticket_save_answer_")
+        ) {
             try {
-
                 const ticketId =
                     customId.replace(
                         "ticket_save_answer_",
                         ""
                     );
 
-                const ticketResult = await db.query(
-                    `
-                    SELECT *
-                    FROM tickets
-                    WHERE id = $1
-                    AND guild_id = $2
-                    AND status = 'closed'
-                    LIMIT 1
-                    `,
-                    [
-                        ticketId,
-                        interaction.guild.id
-                    ]
-                );
+                // ==========================================
+                // FIND TICKET
+                // ==========================================
 
-                if (ticketResult.rows.length === 0) {
+                const ticketResult =
+                    await db.query(
+                        `
+                        SELECT *
+                        FROM tickets
+                        WHERE id = $1
+                        AND guild_id = $2
+                        AND status = 'closed'
+                        LIMIT 1
+                        `,
+                        [
+                            ticketId,
+                            interaction.guild.id
+                        ]
+                    );
+
+                if (
+                    ticketResult.rows.length === 0
+                ) {
                     return interaction.reply({
                         content:
-                            "❌ This ticket could not be found or is not closed.",
+                            "❌ This closed ticket could not be found.",
                         ephemeral: true
                     });
                 }
 
-                const ticket = ticketResult.rows[0];
+                // ==========================================
+                // PERMISSIONS
+                // ==========================================
 
-                const settingsResult = await db.query(
-                    `
-                    SELECT support_role_id
-                    FROM guild_settings
-                    WHERE guild_id = $1
-                    LIMIT 1
-                    `,
-                    [interaction.guild.id]
-                );
+                const settingsResult =
+                    await db.query(
+                        `
+                        SELECT support_role_id
+                        FROM guild_settings
+                        WHERE guild_id = $1
+                        LIMIT 1
+                        `,
+                        [interaction.guild.id]
+                    );
 
                 const supportRoleId =
-                    settingsResult.rows[0]?.support_role_id;
+                    settingsResult.rows[0]
+                        ?.support_role_id;
 
                 const isSupport =
                     supportRoleId &&
@@ -973,66 +1413,107 @@ module.exports = {
                 if (!isSupport && !isAdmin) {
                     return interaction.reply({
                         content:
-                            "❌ Only the Support Team can save answers to Resolve's knowledge.",
+                            "❌ Only the Support Team or a server manager can save answers.",
                         ephemeral: true
                     });
                 }
 
-                // Get ticket conversation
-                const messagesResult = await db.query(
-                    `
-                    SELECT user_id, content, is_staff
-                    FROM ticket_messages
-                    WHERE ticket_id = $1
-                    ORDER BY created_at ASC
-                    `,
-                    [ticket.id]
-                );
+                // ==========================================
+                // GET TICKET MESSAGES
+                // ==========================================
 
-                const messages = messagesResult.rows;
-
-                let suggestedQuestion = "";
-                let suggestedAnswer = "";
-
-                const firstUserMessage =
-                    messages.find(
-                        message => !message.is_staff
+                const messagesResult =
+                    await db.query(
+                        `
+                        SELECT
+                            user_id,
+                            content,
+                            is_staff,
+                            created_at
+                        FROM ticket_messages
+                        WHERE ticket_id = $1
+                        ORDER BY created_at ASC
+                        `,
+                        [ticketId]
                     );
 
-                const lastStaffMessage =
-                    [...messages]
-                        .reverse()
-                        .find(
-                            message => message.is_staff
-                        );
+                const messages =
+                    messagesResult.rows;
 
-                if (firstUserMessage) {
-                    suggestedQuestion =
-                        firstUserMessage.content.slice(
-                            0,
-                            1000
-                        );
-                }
-
-                if (lastStaffMessage) {
-                    suggestedAnswer =
-                        lastStaffMessage.content.slice(
-                            0,
-                            4000
-                        );
+                if (messages.length === 0) {
+                    return interaction.reply({
+                        content:
+                            "❌ There are no saved messages for this ticket yet.",
+                        ephemeral: true
+                    });
                 }
 
                 // ==========================================
-                // SAVE ANSWER MODAL
+                // FIND USER QUESTION
+                // ==========================================
+
+                const firstUserMessage =
+                    messages.find(
+                        message =>
+                            !message.is_staff &&
+                            message.content &&
+                            message.content.trim().length > 0
+                    );
+
+                // ==========================================
+                // FIND LAST STAFF ANSWER
+                // ==========================================
+
+                const staffMessages =
+                    messages.filter(
+                        message =>
+                            message.is_staff &&
+                            message.content &&
+                            message.content.trim().length > 0
+                    );
+
+                const lastStaffMessage =
+                    staffMessages[
+                        staffMessages.length - 1
+                    ];
+
+                if (
+                    !firstUserMessage ||
+                    !lastStaffMessage
+                ) {
+                    return interaction.reply({
+                        content:
+                            "❌ I couldn't find both a user question and a staff answer in this ticket.",
+                        ephemeral: true
+                    });
+                }
+
+                // ==========================================
+                // LIMIT MODAL VALUES
+                // Discord text inputs have a maximum length.
+                // ==========================================
+
+                const question =
+                    firstUserMessage.content
+                        .trim()
+                        .slice(0, 1000);
+
+                const answer =
+                    lastStaffMessage.content
+                        .trim()
+                        .slice(0, 4000);
+
+                // ==========================================
+                // CREATE SAVE MODAL
                 // ==========================================
 
                 const modal =
                     new ModalBuilder()
                         .setCustomId(
-                            `ticket_save_answer_modal_${ticket.id}`
+                            `ticket_save_answer_modal_${ticketId}`
                         )
                         .setTitle(
-                            "Save Answer to Resolve"
+                            "🧠 Save Answer"
                         );
 
                 const questionInput =
@@ -1040,32 +1521,30 @@ module.exports = {
                         .setCustomId(
                             "knowledge_question"
                         )
-                        .setLabel("Question")
+                        .setLabel(
+                            "What was the user's question?"
+                        )
                         .setStyle(
                             TextInputStyle.Paragraph
                         )
                         .setRequired(true)
                         .setMaxLength(1000)
-                        .setValue(
-                            suggestedQuestion ||
-                            "What was the user's question?"
-                        );
+                        .setValue(question);
 
                 const answerInput =
                     new TextInputBuilder()
                         .setCustomId(
                             "knowledge_answer"
                         )
-                        .setLabel("Correct Answer")
+                        .setLabel(
+                            "What is the correct answer?"
+                        )
                         .setStyle(
                             TextInputStyle.Paragraph
                         )
                         .setRequired(true)
                         .setMaxLength(4000)
-                        .setValue(
-                            suggestedAnswer ||
-                            "Enter the correct answer..."
-                        );
+                        .setValue(answer);
 
                 modal.addComponents(
                     new ActionRowBuilder().addComponents(
@@ -1076,9 +1555,9 @@ module.exports = {
                     )
                 );
 
-                await interaction.showModal(modal);
-
-                return;
+                return interaction.showModal(
+                    modal
+                );
 
             } catch (error) {
                 console.error(
@@ -1090,212 +1569,9 @@ module.exports = {
                     !interaction.replied &&
                     !interaction.deferred
                 ) {
-                    await interaction.reply({
+                    return interaction.reply({
                         content:
                             "❌ I couldn't open the Save Answer form.",
-                        ephemeral: true
-                    });
-                }
-
-                return;
-            }
-        }
-
-        // ==========================================
-        // SAVE ANSWER MODAL SUBMIT
-        // ==========================================
-
-        if (
-            interaction.isModalSubmit() &&
-            customId.startsWith(
-                "ticket_save_answer_modal_"
-            )
-        ) {
-
-            try {
-
-                const ticketId =
-                    customId.replace(
-                        "ticket_save_answer_modal_",
-                        ""
-                    );
-
-                const question =
-                    interaction.fields
-                        .getTextInputValue(
-                            "knowledge_question"
-                        )
-                        .trim();
-
-                const answer =
-                    interaction.fields
-                        .getTextInputValue(
-                            "knowledge_answer"
-                        )
-                        .trim();
-
-                if (!question || !answer) {
-                    return interaction.reply({
-                        content:
-                            "❌ Both the question and answer are required.",
-                        ephemeral: true
-                    });
-                }
-
-                const ticketResult = await db.query(
-                    `
-                    SELECT *
-                    FROM tickets
-                    WHERE id = $1
-                    AND guild_id = $2
-                    AND status = 'closed'
-                    LIMIT 1
-                    `,
-                    [
-                        ticketId,
-                        interaction.guild.id
-                    ]
-                );
-
-                if (ticketResult.rows.length === 0) {
-                    return interaction.reply({
-                        content:
-                            "❌ This closed ticket could not be found.",
-                        ephemeral: true
-                    });
-                }
-
-                const settingsResult = await db.query(
-                    `
-                    SELECT support_role_id
-                    FROM guild_settings
-                    WHERE guild_id = $1
-                    LIMIT 1
-                    `,
-                    [interaction.guild.id]
-                );
-
-                const supportRoleId =
-                    settingsResult.rows[0]?.support_role_id;
-
-                const isSupport =
-                    supportRoleId &&
-                    interaction.member.roles.cache.has(
-                        supportRoleId
-                    );
-
-                const isAdmin =
-                    interaction.member.permissions.has(
-                        PermissionFlagsBits.ManageGuild
-                    );
-
-                if (!isSupport && !isAdmin) {
-                    return interaction.reply({
-                        content:
-                            "❌ Only the Support Team can save answers.",
-                        ephemeral: true
-                    });
-                }
-
-                // ==========================================
-                // SAVE TO KNOWLEDGE
-                // ==========================================
-
-                await db.query(
-                    `
-                    INSERT INTO knowledge (
-                        guild_id,
-                        title,
-                        content,
-                        created_by,
-                        approved
-                    )
-                    VALUES ($1, $2, $3, $4, TRUE)
-                    `,
-                    [
-                        interaction.guild.id,
-                        question,
-                        answer,
-                        interaction.user.id
-                    ]
-                );
-
-                // ==========================================
-                // SAVE APPROVED ANSWER
-                // ==========================================
-
-                await db.query(
-                    `
-                    INSERT INTO approved_answers (
-                        guild_id,
-                        question,
-                        answer,
-                        approved_by
-                    )
-                    VALUES ($1, $2, $3, $4)
-                    `,
-                    [
-                        interaction.guild.id,
-                        question,
-                        answer,
-                        interaction.user.id
-                    ]
-                );
-
-                const savedEmbed =
-                    new EmbedBuilder()
-                        .setColor(0x57F287)
-                        .setTitle("🧠 Answer Saved")
-                        .setDescription(
-                            "This answer has been approved and added to Resolve's server knowledge."
-                        )
-                        .addFields(
-                            {
-                                name: "❓ Question",
-                                value: question,
-                                inline: false
-                            },
-                            {
-                                name: "💡 Answer",
-                                value: answer,
-                                inline: false
-                            },
-                            {
-                                name: "👤 Saved By",
-                                value:
-                                    `<@${interaction.user.id}>`,
-                                inline: true
-                            },
-                            {
-                                name: "🔐 Status",
-                                value: "✅ Approved",
-                                inline: true
-                            }
-                        )
-                        .setFooter({
-                            text:
-                                "Resolve • Approved Knowledge"
-                        })
-                        .setTimestamp();
-
-                return interaction.reply({
-                    embeds: [savedEmbed],
-                    ephemeral: true
-                });
-
-            } catch (error) {
-                console.error(
-                    "❌ Save answer modal error:",
-                    error
-                );
-
-                if (
-                    !interaction.replied &&
-                    !interaction.deferred
-                ) {
-                    return interaction.reply({
-                        content:
-                            "❌ I couldn't save this answer to Resolve's knowledge.",
                         ephemeral: true
                     });
                 }
@@ -1308,32 +1584,36 @@ module.exports = {
         // DELETE CLOSED TICKET
         // ==========================================
 
-        if (customId.startsWith("ticket_delete_")) {
-
+        if (
+            interaction.isButton() &&
+            customId.startsWith("ticket_delete_")
+        ) {
             try {
-
                 const ticketId =
                     customId.replace(
                         "ticket_delete_",
                         ""
                     );
 
-                const ticketResult = await db.query(
-                    `
-                    SELECT *
-                    FROM tickets
-                    WHERE id = $1
-                    AND guild_id = $2
-                    AND status = 'closed'
-                    LIMIT 1
-                    `,
-                    [
-                        ticketId,
-                        interaction.guild.id
-                    ]
-                );
+                const ticketResult =
+                    await db.query(
+                        `
+                        SELECT *
+                        FROM tickets
+                        WHERE id = $1
+                        AND guild_id = $2
+                        AND status = 'closed'
+                        LIMIT 1
+                        `,
+                        [
+                            ticketId,
+                            interaction.guild.id
+                        ]
+                    );
 
-                if (ticketResult.rows.length === 0) {
+                if (
+                    ticketResult.rows.length === 0
+                ) {
                     return interaction.reply({
                         content:
                             "❌ This ticket could not be found or is not closed.",
@@ -1341,20 +1621,23 @@ module.exports = {
                     });
                 }
 
-                const ticket = ticketResult.rows[0];
+                const ticket =
+                    ticketResult.rows[0];
 
-                const settingsResult = await db.query(
-                    `
-                    SELECT support_role_id
-                    FROM guild_settings
-                    WHERE guild_id = $1
-                    LIMIT 1
-                    `,
-                    [interaction.guild.id]
-                );
+                const settingsResult =
+                    await db.query(
+                        `
+                        SELECT support_role_id
+                        FROM guild_settings
+                        WHERE guild_id = $1
+                        LIMIT 1
+                        `,
+                        [interaction.guild.id]
+                    );
 
                 const supportRoleId =
-                    settingsResult.rows[0]?.support_role_id;
+                    settingsResult.rows[0]
+                        ?.support_role_id;
 
                 const isSupport =
                     supportRoleId &&
@@ -1370,7 +1653,7 @@ module.exports = {
                 if (!isSupport && !isAdmin) {
                     return interaction.reply({
                         content:
-                            "❌ Only the Support Team can delete closed tickets.",
+                            "❌ Only the Support Team or a server manager can delete closed tickets.",
                         ephemeral: true
                     });
                 }
@@ -1401,7 +1684,7 @@ module.exports = {
                     !interaction.replied &&
                     !interaction.deferred
                 ) {
-                    await interaction.reply({
+                    return interaction.reply({
                         content:
                             "❌ I couldn't delete this ticket.",
                         ephemeral: true
