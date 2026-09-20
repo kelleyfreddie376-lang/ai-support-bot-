@@ -1365,12 +1365,28 @@ module.exports = {
                                         }
                                     );
 
-                            await welcomeMessage.edit({
-                                embeds: [
-                                    updatedEmbed
-                                ],
-                                components: []
-                            });
+                            const closeButton =
+    new ActionRowBuilder()
+        .addComponents(
+            new ButtonBuilder()
+                .setCustomId(
+                    `ticket_close_${ticketId}`
+                )
+                .setLabel("Close")
+                .setEmoji("🔒")
+                .setStyle(
+                    ButtonStyle.Danger
+                )
+        );
+
+await welcomeMessage.edit({
+    embeds: [
+        updatedEmbed
+    ],
+    components: [
+        closeButton
+    ]
+});
                         }
                     } catch (error) {
                         console.error(
