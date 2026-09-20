@@ -801,7 +801,19 @@ module.exports = {
 
                 return;
             }
+            // ==========================================
+// TICKET OWNER ONLY
+// ==========================================
 
+// Resolve only responds to the person who owns the ticket.
+// Staff and other users can still talk in the ticket,
+// but Resolve will completely ignore their messages.
+if (
+    String(message.author.id) !==
+    String(ticket.user_id)
+) {
+    return;
+}
             // ==========================================
             // LOAD SERVER SETTINGS
             // ==========================================
