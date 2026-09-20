@@ -14,6 +14,226 @@ const commands = require("../commands");
 const db = require("../database/db");
 const { awardAchievement } = require("../services/achievements");
 
+// ==========================================
+// TICKET LOG CHANNEL
+// ==========================================
+
+async function getTicketLogChannel(guild) {
+    try {
+        let logChannel = guild.channels.cache.find(
+            channel =>
+                channel.type === ChannelType.GuildText &&
+                channel.name === "ticket-logs"
+        );
+
+        if (logChannel) {
+            return logChannel;
+        }
+
+        const settingsResult = await db.query(
+            `
+            SELECT support_role_id
+            FROM guild_settings
+            WHERE guild_id = $1
+            LIMIT 1
+            `,
+            [guild.id]
+        );
+
+        const supportRoleId =
+            settingsResult.rows[0]?.support_role_id;
+
+        const permissionOverwrites = [
+            {
+                id: guild.roles.everyone.id,
+                deny: [
+                    PermissionFlagsBits.ViewChannel
+                ]
+            }
+        ];
+
+        if (guild.members.me) {
+            permissionOverwrites.push({
+                id: guild.members.me.id,
+                allow: [
+                    PermissionFlagsBits.ViewChannel,
+                    PermissionFlagsBits.SendMessages,
+                    PermissionFlagsBits.EmbedLinks,
+                    PermissionFlagsBits.ReadMessageHistory
+                ]
+            });
+        }
+
+        if (supportRoleId) {
+            permissionOverwrites.push({
+                id: supportRoleId,
+                allow: [
+                    PermissionFlagsBits.ViewChannel,
+                    PermissionFlagsBits.ReadMessageHistory
+                ]
+            });
+        }
+
+        logChannel = await guild.channels.create({
+            name: "ticket-logs",
+            type: ChannelType.GuildText,
+            permissionOverwrites,
+            reason: "Resolve automatic ticket logging channel"
+        });
+
+        console.log(
+            `📋 Created #ticket-logs in ${guild.name}`
+        );
+
+        return logChannel;
+
+    } catch (error) {
+        console.error(
+            "❌ Could not create/find ticket log channel:",
+            error
+        );
+
+        return null;
+    }
+}
+
+// ==========================================
+// SEND TICKET LOG
+// ==========================================
+
+async function logTicketEvent({
+    guild,
+    type,
+    ticketId,
+    ticketOwnerId,
+    ticketChannel,
+    priority,
+    staffId,
+    details
+}) {
+    try {
+        const logChannel =
+            await getTicketLogChannel(guild);
+
+        if (!logChannel) {
+            return;
+        }
+
+        const priorityNames = {
+            low: "🟢 Low",
+            normal: "🔵 Normal",
+            high: "🟠 High",
+            urgent: "🔴 Urgent"
+        };
+
+        const eventSettings = {
+            created: {
+                title: "🎫 Ticket Created",
+                color: 0x5865F2,
+                status: "🤖 AI Reviewing"
+            },
+
+            claimed: {
+                title: "🙋 Ticket Claimed",
+                color: 0x5865F2,
+                status: "👥 Human Support"
+            },
+
+            closed: {
+                title: "🔒 Ticket Closed",
+                color: 0xED4245,
+                status: "🔒 Closed"
+            },
+
+            deleted: {
+                title: "🗑️ Ticket Deleted",
+                color: 0xED4245,
+                status: "🗑️ Deleted"
+            },
+
+            handoff: {
+                title: "👥 Human Support Handoff",
+                color: 0xFEE75C,
+                status: "👥 Human Support"
+            }
+        };
+
+        const settings =
+            eventSettings[type] ||
+            eventSettings.created;
+
+        const embed =
+            new EmbedBuilder()
+                .setColor(settings.color)
+                .setTitle(settings.title)
+                .setDescription(
+                    details ||
+                    "Resolve recorded a ticket event."
+                )
+                .addFields(
+                    {
+                        name: "🆔 Ticket ID",
+                        value:
+                            `#${ticketId}`,
+                        inline: true
+                    },
+                    {
+                        name: "👤 Ticket Owner",
+                        value:
+                            ticketOwnerId
+                                ? `<@${ticketOwnerId}>`
+                                : "Unknown",
+                        inline: true
+                    },
+                    {
+                        name: "📊 Priority",
+                        value:
+                            priorityNames[priority] ||
+                            "🔵 Normal",
+                        inline: true
+                    },
+                    {
+                        name: "📌 Status",
+                        value:
+                            settings.status,
+                        inline: true
+                    },
+                    {
+                        name: "📁 Ticket Channel",
+                        value:
+                            ticketChannel
+                                ? `<#${ticketChannel}>`
+                                : "Deleted",
+                        inline: true
+                    }
+                )
+                .setFooter({
+                    text:
+                        "Resolve • Ticket Logs"
+                })
+                .setTimestamp();
+
+        if (staffId) {
+            embed.addFields({
+                name: "👤 Staff Member",
+                value:
+                    `<@${staffId}>`,
+                inline: true
+            });
+        }
+
+        await logChannel.send({
+            embeds: [embed]
+        });
+
+    } catch (error) {
+        console.error(
+            "⚠️ Ticket logging error:",
+            error
+        );
+    }
+}
+
 module.exports = {
     name: "interactionCreate",
 
@@ -38,7 +258,10 @@ module.exports = {
                     error
                 );
 
-                if (interaction.replied || interaction.deferred) {
+                if (
+                    interaction.replied ||
+                    interaction.deferred
+                ) {
                     await interaction.followUp({
                         content:
                             "❌ Something went wrong while running that command.",
@@ -60,35 +283,45 @@ module.exports = {
         // ONLY HANDLE BUTTONS / MODALS
         // ==========================================
 
-        if (!interaction.isButton() && !interaction.isModalSubmit()) {
+        if (
+            !interaction.isButton() &&
+            !interaction.isModalSubmit()
+        ) {
             return;
         }
 
-        const customId = interaction.customId;
+        const customId =
+            interaction.customId;
 
         // ==========================================
-        // SAVE ANSWER MODAL SUBMIT
-        // IMPORTANT: THIS MUST BE BEFORE BUTTONS
+        // SAVE ANSWER MODAL
         // ==========================================
 
         if (
             interaction.isModalSubmit() &&
-            customId.startsWith("ticket_save_answer_modal_")
+            customId.startsWith(
+                "ticket_save_answer_modal_"
+            )
         ) {
             try {
-                const ticketId = customId.replace(
-                    "ticket_save_answer_modal_",
-                    ""
-                );
+                const ticketId =
+                    customId.replace(
+                        "ticket_save_answer_modal_",
+                        ""
+                    );
 
                 const question =
                     interaction.fields
-                        .getTextInputValue("knowledge_question")
+                        .getTextInputValue(
+                            "knowledge_question"
+                        )
                         .trim();
 
                 const answer =
                     interaction.fields
-                        .getTextInputValue("knowledge_answer")
+                        .getTextInputValue(
+                            "knowledge_answer"
+                        )
                         .trim();
 
                 if (!question || !answer) {
@@ -99,26 +332,25 @@ module.exports = {
                     });
                 }
 
-                // ==========================================
-                // FIND CLOSED TICKET
-                // ==========================================
+                const ticketResult =
+                    await db.query(
+                        `
+                        SELECT *
+                        FROM tickets
+                        WHERE id = $1
+                        AND guild_id = $2
+                        AND status = 'closed'
+                        LIMIT 1
+                        `,
+                        [
+                            ticketId,
+                            interaction.guild.id
+                        ]
+                    );
 
-                const ticketResult = await db.query(
-                    `
-                    SELECT *
-                    FROM tickets
-                    WHERE id = $1
-                    AND guild_id = $2
-                    AND status = 'closed'
-                    LIMIT 1
-                    `,
-                    [
-                        ticketId,
-                        interaction.guild.id
-                    ]
-                );
-
-                if (ticketResult.rows.length === 0) {
+                if (
+                    ticketResult.rows.length === 0
+                ) {
                     return interaction.reply({
                         content:
                             "❌ This closed ticket could not be found.",
@@ -126,22 +358,20 @@ module.exports = {
                     });
                 }
 
-                // ==========================================
-                // GET SUPPORT ROLE
-                // ==========================================
-
-                const settingsResult = await db.query(
-                    `
-                    SELECT support_role_id
-                    FROM guild_settings
-                    WHERE guild_id = $1
-                    LIMIT 1
-                    `,
-                    [interaction.guild.id]
-                );
+                const settingsResult =
+                    await db.query(
+                        `
+                        SELECT support_role_id
+                        FROM guild_settings
+                        WHERE guild_id = $1
+                        LIMIT 1
+                        `,
+                        [interaction.guild.id]
+                    );
 
                 const supportRoleId =
-                    settingsResult.rows[0]?.support_role_id;
+                    settingsResult.rows[0]
+                        ?.support_role_id;
 
                 const isSupport =
                     supportRoleId &&
@@ -162,10 +392,6 @@ module.exports = {
                     });
                 }
 
-                // ==========================================
-                // VALIDATE QUESTION
-                // ==========================================
-
                 if (question.length < 3) {
                     return interaction.reply({
                         content:
@@ -182,27 +408,26 @@ module.exports = {
                     });
                 }
 
-                // ==========================================
-                // CHECK FOR DUPLICATE KNOWLEDGE
-                // ==========================================
+                const existingKnowledge =
+                    await db.query(
+                        `
+                        SELECT id
+                        FROM knowledge
+                        WHERE guild_id = $1
+                        AND LOWER(title) = LOWER($2)
+                        AND LOWER(content) = LOWER($3)
+                        LIMIT 1
+                        `,
+                        [
+                            interaction.guild.id,
+                            question,
+                            answer
+                        ]
+                    );
 
-                const existingKnowledge = await db.query(
-                    `
-                    SELECT id
-                    FROM knowledge
-                    WHERE guild_id = $1
-                    AND LOWER(title) = LOWER($2)
-                    AND LOWER(content) = LOWER($3)
-                    LIMIT 1
-                    `,
-                    [
-                        interaction.guild.id,
-                        question,
-                        answer
-                    ]
-                );
-
-                if (existingKnowledge.rows.length > 0) {
+                if (
+                    existingKnowledge.rows.length > 0
+                ) {
                     return interaction.reply({
                         content:
                             "ℹ️ This exact question and answer is already in Resolve's approved knowledge.",
@@ -210,11 +435,8 @@ module.exports = {
                     });
                 }
 
-                // ==========================================
-                // SAVE KNOWLEDGE
-                // ==========================================
-
-                const client = await db.connect();
+                const client =
+                    await db.connect();
 
                 try {
                     await client.query("BEGIN");
@@ -279,14 +501,12 @@ module.exports = {
                     client.release();
                 }
 
-                // ==========================================
-                // SUCCESS EMBED
-                // ==========================================
-
                 const savedEmbed =
                     new EmbedBuilder()
                         .setColor(0x57F287)
-                        .setTitle("🧠 Answer Saved Successfully")
+                        .setTitle(
+                            "🧠 Answer Saved Successfully"
+                        )
                         .setDescription(
                             "Resolve has added this answer to the server's approved AI knowledge."
                         )
@@ -309,7 +529,8 @@ module.exports = {
                             },
                             {
                                 name: "🔐 Knowledge Status",
-                                value: "✅ Approved",
+                                value:
+                                    "✅ Approved",
                                 inline: true
                             }
                         )
@@ -355,12 +576,15 @@ module.exports = {
 
         if (
             interaction.isButton() &&
-            customId.startsWith("knowledge_approve_")
+            customId.startsWith(
+                "knowledge_approve_"
+            )
         ) {
-            const knowledgeId = customId.replace(
-                "knowledge_approve_",
-                ""
-            );
+            const knowledgeId =
+                customId.replace(
+                    "knowledge_approve_",
+                    ""
+                );
 
             try {
                 if (
@@ -375,21 +599,22 @@ module.exports = {
                     });
                 }
 
-                const result = await db.query(
-                    `
-                    UPDATE knowledge
-                    SET approved = TRUE,
-                        updated_at = NOW()
-                    WHERE id = $1
-                    AND guild_id = $2
-                    AND approved = FALSE
-                    RETURNING title, content
-                    `,
-                    [
-                        knowledgeId,
-                        interaction.guild.id
-                    ]
-                );
+                const result =
+                    await db.query(
+                        `
+                        UPDATE knowledge
+                        SET approved = TRUE,
+                            updated_at = NOW()
+                        WHERE id = $1
+                        AND guild_id = $2
+                        AND approved = FALSE
+                        RETURNING title, content
+                        `,
+                        [
+                            knowledgeId,
+                            interaction.guild.id
+                        ]
+                    );
 
                 if (result.rows.length === 0) {
                     return interaction.reply({
@@ -399,42 +624,49 @@ module.exports = {
                     });
                 }
 
-                const knowledge = result.rows[0];
+                const knowledge =
+                    result.rows[0];
 
-                const embed = new EmbedBuilder()
-                    .setColor(0x57F287)
-                    .setTitle("✅ Knowledge Verified")
-                    .setDescription(
-                        "This information has been approved and can now be used by Resolve."
-                    )
-                    .addFields(
-                        {
-                            name: "📌 Title",
-                            value: knowledge.title,
-                            inline: false
-                        },
-                        {
-                            name: "📖 Information",
-                            value: knowledge.content,
-                            inline: false
-                        },
-                        {
-                            name: "👤 Verified By",
-                            value:
-                                `<@${interaction.user.id}>`,
-                            inline: true
-                        },
-                        {
-                            name: "🔐 Status",
-                            value: "✅ Verified",
-                            inline: true
-                        }
-                    )
-                    .setFooter({
-                        text:
-                            "Resolve • Knowledge Verification"
-                    })
-                    .setTimestamp();
+                const embed =
+                    new EmbedBuilder()
+                        .setColor(0x57F287)
+                        .setTitle(
+                            "✅ Knowledge Verified"
+                        )
+                        .setDescription(
+                            "This information has been approved and can now be used by Resolve."
+                        )
+                        .addFields(
+                            {
+                                name: "📌 Title",
+                                value:
+                                    knowledge.title,
+                                inline: false
+                            },
+                            {
+                                name: "📖 Information",
+                                value:
+                                    knowledge.content,
+                                inline: false
+                            },
+                            {
+                                name: "👤 Verified By",
+                                value:
+                                    `<@${interaction.user.id}>`,
+                                inline: true
+                            },
+                            {
+                                name: "🔐 Status",
+                                value:
+                                    "✅ Verified",
+                                inline: true
+                            }
+                        )
+                        .setFooter({
+                            text:
+                                "Resolve • Knowledge Verification"
+                        })
+                        .setTimestamp();
 
                 await interaction.update({
                     embeds: [embed],
@@ -474,12 +706,15 @@ module.exports = {
 
         if (
             interaction.isButton() &&
-            customId.startsWith("knowledge_reject_")
+            customId.startsWith(
+                "knowledge_reject_"
+            )
         ) {
-            const knowledgeId = customId.replace(
-                "knowledge_reject_",
-                ""
-            );
+            const knowledgeId =
+                customId.replace(
+                    "knowledge_reject_",
+                    ""
+                );
 
             try {
                 if (
@@ -494,19 +729,20 @@ module.exports = {
                     });
                 }
 
-                const result = await db.query(
-                    `
-                    DELETE FROM knowledge
-                    WHERE id = $1
-                    AND guild_id = $2
-                    AND approved = FALSE
-                    RETURNING title
-                    `,
-                    [
-                        knowledgeId,
-                        interaction.guild.id
-                    ]
-                );
+                const result =
+                    await db.query(
+                        `
+                        DELETE FROM knowledge
+                        WHERE id = $1
+                        AND guild_id = $2
+                        AND approved = FALSE
+                        RETURNING title
+                        `,
+                        [
+                            knowledgeId,
+                            interaction.guild.id
+                        ]
+                    );
 
                 if (result.rows.length === 0) {
                     return interaction.reply({
@@ -516,37 +752,42 @@ module.exports = {
                     });
                 }
 
-                const title = result.rows[0].title;
+                const title =
+                    result.rows[0].title;
 
-                const embed = new EmbedBuilder()
-                    .setColor(0xED4245)
-                    .setTitle("❌ Knowledge Rejected")
-                    .setDescription(
-                        "This information was rejected and has been removed from Resolve's knowledge system."
-                    )
-                    .addFields(
-                        {
-                            name: "📌 Title",
-                            value: title,
-                            inline: false
-                        },
-                        {
-                            name: "👤 Rejected By",
-                            value:
-                                `<@${interaction.user.id}>`,
-                            inline: true
-                        },
-                        {
-                            name: "🔐 Status",
-                            value: "❌ Rejected",
-                            inline: true
-                        }
-                    )
-                    .setFooter({
-                        text:
-                            "Resolve • Knowledge Verification"
-                    })
-                    .setTimestamp();
+                const embed =
+                    new EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle(
+                            "❌ Knowledge Rejected"
+                        )
+                        .setDescription(
+                            "This information was rejected and has been removed from Resolve's knowledge system."
+                        )
+                        .addFields(
+                            {
+                                name: "📌 Title",
+                                value: title,
+                                inline: false
+                            },
+                            {
+                                name: "👤 Rejected By",
+                                value:
+                                    `<@${interaction.user.id}>`,
+                                inline: true
+                            },
+                            {
+                                name: "🔐 Status",
+                                value:
+                                    "❌ Rejected",
+                                inline: true
+                            }
+                        )
+                        .setFooter({
+                            text:
+                                "Resolve • Knowledge Verification"
+                        })
+                        .setTimestamp();
 
                 await interaction.update({
                     embeds: [embed],
@@ -581,17 +822,20 @@ module.exports = {
         }
 
         // ==========================================
-        // TICKET PRIORITY BUTTONS
+        // TICKET PRIORITY / CREATE
         // ==========================================
 
         if (
             interaction.isButton() &&
-            customId.startsWith("ticket_priority_")
+            customId.startsWith(
+                "ticket_priority_"
+            )
         ) {
-            const priority = customId.replace(
-                "ticket_priority_",
-                ""
-            );
+            const priority =
+                customId.replace(
+                    "ticket_priority_",
+                    ""
+                );
 
             const priorityNames = {
                 low: "🟢 Low",
@@ -637,7 +881,8 @@ module.exports = {
                 ) {
                     const existingChannel =
                         interaction.guild.channels.cache.get(
-                            existingTicket.rows[0].channel_id
+                            existingTicket.rows[0]
+                                .channel_id
                         );
 
                     if (existingChannel) {
@@ -740,7 +985,8 @@ module.exports = {
                                     ""
                                 )
                                 .slice(0, 80),
-                        type: ChannelType.GuildText,
+                        type:
+                            ChannelType.GuildText,
                         parent:
                             category &&
                             category.type ===
@@ -816,27 +1062,28 @@ module.exports = {
                         .setTimestamp();
 
                 const ticketButtons =
-                    new ActionRowBuilder().addComponents(
-                        new ButtonBuilder()
-                            .setCustomId(
-                                `ticket_claim_${ticketId}`
-                            )
-                            .setLabel("Claim")
-                            .setEmoji("🙋")
-                            .setStyle(
-                                ButtonStyle.Primary
-                            ),
+                    new ActionRowBuilder()
+                        .addComponents(
+                            new ButtonBuilder()
+                                .setCustomId(
+                                    `ticket_claim_${ticketId}`
+                                )
+                                .setLabel("Claim")
+                                .setEmoji("🙋")
+                                .setStyle(
+                                    ButtonStyle.Primary
+                                ),
 
-                        new ButtonBuilder()
-                            .setCustomId(
-                                `ticket_close_${ticketId}`
-                            )
-                            .setLabel("Close")
-                            .setEmoji("🔒")
-                            .setStyle(
-                                ButtonStyle.Danger
-                            )
-                    );
+                            new ButtonBuilder()
+                                .setCustomId(
+                                    `ticket_close_${ticketId}`
+                                )
+                                .setLabel("Close")
+                                .setEmoji("🔒")
+                                .setStyle(
+                                    ButtonStyle.Danger
+                                )
+                        );
 
                 const welcomeMessage =
                     await channel.send({
@@ -879,6 +1126,23 @@ module.exports = {
                     ephemeral: true
                 });
 
+                // ==========================================
+                // LOG TICKET CREATION
+                // ==========================================
+
+                await logTicketEvent({
+                    guild: interaction.guild,
+                    type: "created",
+                    ticketId,
+                    ticketOwnerId:
+                        interaction.user.id,
+                    ticketChannel:
+                        channel.id,
+                    priority,
+                    details:
+                        `A new support ticket was created by <@${interaction.user.id}>.`
+                });
+
                 console.log(
                     `🎫 Ticket #${ticketId} created by ${interaction.user.tag} (${priority})`
                 );
@@ -912,7 +1176,9 @@ module.exports = {
 
         if (
             interaction.isButton() &&
-            customId.startsWith("ticket_claim_")
+            customId.startsWith(
+                "ticket_claim_"
+            )
         ) {
             try {
                 const ticketId =
@@ -1067,7 +1333,9 @@ module.exports = {
                                 new EmbedBuilder(
                                     originalEmbed
                                 )
-                                    .setColor(0x5865F2)
+                                    .setColor(
+                                        0x5865F2
+                                    )
                                     .setFields(
                                         {
                                             name:
@@ -1112,6 +1380,26 @@ module.exports = {
                     }
                 }
 
+                // ==========================================
+                // LOG CLAIM
+                // ==========================================
+
+                await logTicketEvent({
+                    guild: interaction.guild,
+                    type: "claimed",
+                    ticketId,
+                    ticketOwnerId:
+                        ticket.user_id,
+                    ticketChannel:
+                        ticket.channel_id,
+                    priority:
+                        ticket.priority,
+                    staffId:
+                        interaction.user.id,
+                    details:
+                        `<@${interaction.user.id}> claimed this ticket and Resolve AI has stepped back.`
+                });
+
                 console.log(
                     `🙋 Ticket #${ticketId} claimed by ${interaction.user.tag}`
                 );
@@ -1145,7 +1433,9 @@ module.exports = {
 
         if (
             interaction.isButton() &&
-            customId.startsWith("ticket_close_")
+            customId.startsWith(
+                "ticket_close_"
+            )
         ) {
             try {
                 const ticketId =
@@ -1273,31 +1563,32 @@ module.exports = {
                         .setTimestamp();
 
                 const closedButtons =
-                    new ActionRowBuilder().addComponents(
-                        new ButtonBuilder()
-                            .setCustomId(
-                                `ticket_save_answer_${ticketId}`
-                            )
-                            .setLabel(
-                                "Save Answer"
-                            )
-                            .setEmoji("🧠")
-                            .setStyle(
-                                ButtonStyle.Success
-                            ),
+                    new ActionRowBuilder()
+                        .addComponents(
+                            new ButtonBuilder()
+                                .setCustomId(
+                                    `ticket_save_answer_${ticketId}`
+                                )
+                                .setLabel(
+                                    "Save Answer"
+                                )
+                                .setEmoji("🧠")
+                                .setStyle(
+                                    ButtonStyle.Success
+                                ),
 
-                        new ButtonBuilder()
-                            .setCustomId(
-                                `ticket_delete_${ticketId}`
-                            )
-                            .setLabel(
-                                "Delete Ticket"
-                            )
-                            .setEmoji("🗑️")
-                            .setStyle(
-                                ButtonStyle.Danger
-                            )
-                    );
+                            new ButtonBuilder()
+                                .setCustomId(
+                                    `ticket_delete_${ticketId}`
+                                )
+                                .setLabel(
+                                    "Delete Ticket"
+                                )
+                                .setEmoji("🗑️")
+                                .setStyle(
+                                    ButtonStyle.Danger
+                                )
+                        );
 
                 await interaction.reply({
                     embeds: [
@@ -1306,6 +1597,26 @@ module.exports = {
                     components: [
                         closedButtons
                     ]
+                });
+
+                // ==========================================
+                // LOG CLOSE
+                // ==========================================
+
+                await logTicketEvent({
+                    guild: interaction.guild,
+                    type: "closed",
+                    ticketId,
+                    ticketOwnerId:
+                        ticket.user_id,
+                    ticketChannel:
+                        ticket.channel_id,
+                    priority:
+                        ticket.priority,
+                    staffId:
+                        interaction.user.id,
+                    details:
+                        `<@${interaction.user.id}> closed this ticket.`
                 });
 
                 console.log(
@@ -1341,7 +1652,9 @@ module.exports = {
 
         if (
             interaction.isButton() &&
-            customId.startsWith("ticket_save_answer_")
+            customId.startsWith(
+                "ticket_save_answer_"
+            )
         ) {
             try {
                 const ticketId =
@@ -1349,10 +1662,6 @@ module.exports = {
                         "ticket_save_answer_",
                         ""
                     );
-
-                // ==========================================
-                // FIND TICKET
-                // ==========================================
 
                 const ticketResult =
                     await db.query(
@@ -1379,10 +1688,6 @@ module.exports = {
                         ephemeral: true
                     });
                 }
-
-                // ==========================================
-                // PERMISSIONS
-                // ==========================================
 
                 const settingsResult =
                     await db.query(
@@ -1418,10 +1723,6 @@ module.exports = {
                     });
                 }
 
-                // ==========================================
-                // GET TICKET MESSAGES
-                // ==========================================
-
                 const messagesResult =
                     await db.query(
                         `
@@ -1448,10 +1749,6 @@ module.exports = {
                     });
                 }
 
-                // ==========================================
-                // FIND USER QUESTION
-                // ==========================================
-
                 const firstUserMessage =
                     messages.find(
                         message =>
@@ -1459,10 +1756,6 @@ module.exports = {
                             message.content &&
                             message.content.trim().length > 0
                     );
-
-                // ==========================================
-                // FIND LAST STAFF ANSWER
-                // ==========================================
 
                 const staffMessages =
                     messages.filter(
@@ -1488,11 +1781,6 @@ module.exports = {
                     });
                 }
 
-                // ==========================================
-                // LIMIT MODAL VALUES
-                // Discord text inputs have a maximum length.
-                // ==========================================
-
                 const question =
                     firstUserMessage.content
                         .trim()
@@ -1502,10 +1790,6 @@ module.exports = {
                     lastStaffMessage.content
                         .trim()
                         .slice(0, 4000);
-
-                // ==========================================
-                // CREATE SAVE MODAL
-                // ==========================================
 
                 const modal =
                     new ModalBuilder()
@@ -1586,7 +1870,9 @@ module.exports = {
 
         if (
             interaction.isButton() &&
-            customId.startsWith("ticket_delete_")
+            customId.startsWith(
+                "ticket_delete_"
+            )
         ) {
             try {
                 const ticketId =
@@ -1664,8 +1950,28 @@ module.exports = {
                     ephemeral: true
                 });
 
+                // ==========================================
+                // LOG DELETE BEFORE CHANNEL DISAPPEARS
+                // ==========================================
+
+                await logTicketEvent({
+                    guild: interaction.guild,
+                    type: "deleted",
+                    ticketId,
+                    ticketOwnerId:
+                        ticket.user_id,
+                    ticketChannel:
+                        ticket.channel_id,
+                    priority:
+                        ticket.priority,
+                    staffId:
+                        interaction.user.id,
+                    details:
+                        `<@${interaction.user.id}> deleted this ticket channel.`
+                });
+
                 console.log(
-                    `🗑️ Ticket ${ticket.id} deleted by ${interaction.user.tag}`
+                    `🗑️ Ticket #${ticket.id} deleted by ${interaction.user.tag}`
                 );
 
                 await interaction.channel.delete(
